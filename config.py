@@ -10,6 +10,12 @@ DISCORD_TOKEN = os.getenv("DISCORD_TOKEN", "")
 # Optional: your server ID. Makes slash commands show up instantly instead of after ~1 hour.
 GUILD_ID = int(os.getenv("GUILD_ID") or 0) or None
 
+# Channels where /event commands may be used, separated by commas. Empty means everywhere.
+# Event channels created by the bot always allow commands, so events can be managed there.
+ALLOWED_CHANNEL_IDS = {
+    int(part) for part in os.getenv("ALLOWED_CHANNEL_IDS", "").replace(" ", ",").split(",") if part.strip()
+}
+
 # Timezone used to interpret times typed in /event create, e.g. "20:00".
 TIMEZONE = ZoneInfo(os.getenv("TIMEZONE", "Europe/Amsterdam"))
 

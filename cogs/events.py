@@ -182,6 +182,17 @@ class Events(commands.GroupCog, group_name="event", group_description="Create an
     def cog_unload(self):
         self.housekeeping.cancel()
 
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        """Only allow commands in the configured channels, and always in event channels."""
+        if not config.ALLOWED_CHANNEL_IDS or interaction.channel_id in config.ALLOWED_CHANNEL_IDS:
+            return True
+        if self.db.get_event_by_channel(interaction.channel_id) is not None:
+            return True
+        channels = ", ".join(f"<#{cid}>" for cid in sorted(config.ALLOWED_CHANNEL_IDS))
+        await interaction.response.send_message(
+            f"Event commands can't be used here. Use them in {channels}.", ephemeral=True)
+        return False
+
     # --- helpers ------------------------------------------------------------
 
     async def refresh_announcement(self, event: Event, remove_buttons: bool = False) -> None:
