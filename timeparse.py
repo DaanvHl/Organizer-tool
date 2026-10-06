@@ -5,7 +5,7 @@ NO_YEAR_FORMATS = ["%d-%m %H:%M", "%d/%m %H:%M"]
 
 HELP = (
     "I couldn't understand that time. Try one of these:\n"
-    "• `20:00` (today, or tomorrow if that time has passed)\n"
+    "• `20:00` or `20` (today, or tomorrow if that time has passed)\n"
     "• `tomorrow 20:00`\n"
     "• `10-10 20:00` (day-month)\n"
     "• `10-10-2026 20:00` or `2026-10-10 20:00`"
@@ -42,6 +42,8 @@ def parse_time(text: str, tz: tzinfo) -> datetime:
         for prefix, offset in (("today ", 0), ("tomorrow ", 1)):
             if text.startswith(prefix):
                 day_offset, clock = offset, text[len(prefix):]
+        if clock.isdigit():
+            clock += ":00"  # "11" means 11:00
         try:
             hm = datetime.strptime(clock, "%H:%M")
         except ValueError:

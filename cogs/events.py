@@ -529,6 +529,8 @@ class Events(commands.GroupCog, group_name="event", group_description="Create an
 
     async def cog_app_command_error(self, interaction: discord.Interaction,
                                     error: app_commands.AppCommandError):
+        if isinstance(error, app_commands.CheckFailure):
+            return  # interaction_check already told the user why
         log.exception("Error in event command", exc_info=error)
         message = "Something went wrong. Check the bot's console for details."
         if interaction.response.is_done():
