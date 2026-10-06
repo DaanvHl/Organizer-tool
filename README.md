@@ -17,6 +17,8 @@ over, the channel and role are deleted.
 | `/event reopen` | Inside the event channel | Organizer / admins |
 | `/event poll` | Inside the event channel | Organizer / admins |
 | `/event captains captain1 captain2` | Inside the event channel | Organizer / admins |
+| `/event move` | Inside the event channel | Organizer / admins |
+| `/event regroup` | Inside the event channel | Organizer / admins |
 | `/event end` | Inside the event channel | Organizer / admins |
 | `/event cancel` | Inside the event channel | Organizer / admins |
 | `/event list` | Anywhere | Everyone |
@@ -47,6 +49,22 @@ least 4 players and an even number of players, and both captains are in the even
 whose turn it is can pick; the last player is assigned automatically. Running it again replaces
 the current draft.
 
+**Team voice channels:** when a draft completes, each team gets a role and a private voice channel
+(🔴 / 🔵). Players who are in voice are moved automatically. `/event move` moves everyone to their
+team channel again, `/event regroup` pulls all players into the voice channel you're in. Team
+channels and roles are deleted when the event ends or a new draft starts.
+
+## Fun commands
+
+Usable anywhere: `/excuse`, `/roast member`, `/blame` (picks a random culprit: event players in an
+event channel, otherwise recent chatters), `/bonk member` (with lifetime bonk counter), `/coinflip`
+and `/8ball question`.
+
+**Keyword reactions** (`FUN_KEYWORDS=true`): the bot reacts to words like `gg` 🫡, `bruh` 💀 and
+`noob` 🍼, and replies to `ez`, `lag`, `rigged`, `afk` and `who asked` (at most once per
+`KEYWORD_COOLDOWN_SECONDS` per channel). This needs **Message Content Intent** enabled in the
+developer portal (*Bot* page) — enable it *before* setting `FUN_KEYWORDS=true`, or the bot won't start.
+
 Automatic behaviour:
 - The event role is pinged `REMINDER_MINUTES` (default 15) before the start.
 - Sign-ups close at the start time.
@@ -57,8 +75,8 @@ Automatic behaviour:
 1. **Create the bot** at <https://discord.com/developers/applications> → New Application → *Bot* →
    *Reset Token* and copy the token. No privileged intents are needed.
 2. **Invite it**: *OAuth2 → URL Generator*, scopes `bot` + `applications.commands`, permissions
-   **Manage Roles**, **Manage Channels**, **View Channels**, **Send Messages**, **Embed Links**,
-   **Read Message History**. Open the generated URL and add the bot to your server.
+   **Manage Roles**, **Manage Channels**, **Move Members**, **View Channels**, **Send Messages**,
+   **Embed Links**, **Read Message History**, **Add Reactions**. Open the generated URL and add the bot to your server.
 3. **Role order**: in *Server Settings → Roles*, drag the bot's role near the top. It can only
    manage roles that are *below* its own role.
 4. **Configure**: copy `.env.example` to `.env` and fill in `DISCORD_TOKEN` and `GUILD_ID`.

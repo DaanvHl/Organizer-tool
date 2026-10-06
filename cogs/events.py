@@ -1,4 +1,5 @@
 import logging
+import random
 import re
 import time
 from datetime import datetime
@@ -23,6 +24,14 @@ STATUS_FOOTERS = {
 
 MAX_POLL_OPTIONS = 25  # Discord's limit for a select menu
 
+
+LAST_PICK_LINES = [
+    "Last pick, but first in our hearts 💔",
+    "Mr. Irrelevant has entered the chat.",
+    "Someone had to be last. Today it's them.",
+    "Picked last, plays like first. Probably. Maybe.",
+    "Not picked, just... included. 🫂",
+]
 
 MAX_DRAFT_POOL = 125  # 5 menus of 25 players; a message holds at most 5 rows
 
@@ -348,6 +357,8 @@ class Events(commands.GroupCog, group_name="event", group_description="Create an
         guild = self.bot.get_guild(event.guild_id)
         if guild is None:
             return
+        for draft in self.db.drafts_with_teams(event.id):
+            await self.delete_team_channels(guild, draft)
         reason = f"Event '{event.name}' {status}"
         channel = guild.get_channel(event.channel_id) if event.channel_id else None
         if channel is not None:
@@ -534,19 +545,123 @@ class Events(commands.GroupCog, group_name="event", group_description="Create an
                            if p.team == team_key]
                 log_lines.append(f"**Team <@{team_captain}>**: " + ", ".join(members))
             log_lines.insert(0, "✅ **Draft complete!**")
+            if len(players) > 2:
+                log_lines.append(f"*{random.choice(LAST_PICK_LINES)}*")
             mentions = discord.AllowedMentions.none()
         await interaction.channel.send("\n".join(log_lines), allowed_mentions=mentions)
+
+        if not remaining:
+            await self.create_team_channels(interaction.guild, interaction.channel, event, draft, players)
+
+    # --- team voice channels ---------------------------------------------------
+
+    async def create_team_channels(self, guild: discord.Guild, channel: discord.abc.Messageable,
+                                   event: Event, draft: Draft, players: List[DraftPlayer]) -> None:
+        """Creates a role and private voice channel per team, then moves players who are in voice."""
+        names = {p.user_id: p.name for p in players}
+        created = {}
+        try:
+            category = await self.get_category(guild)
+            for team, captain, emoji in (("A", draft.captain_a, "🔴"), ("B", draft.captain_b, "🔵")):
+                team_name = f"Team {names.get(captain, team)}"
+                role = await guild.create_role(name=f"{team_name} ({event.name})"[:100],
+                                               reason=f"Draft teams for event '{event.name}'")
+                created[f"{team}_role"] = role
+                overwrites = {
+                    guild.default_role: discord.PermissionOverwrite(view_channel=False),
+                    role: discord.PermissionOverwrite(view_channel=True, connect=True, speak=True),
+                    guild.me: discord.PermissionOverwrite(view_channel=True, connect=True),
+                }
+                voice = await guild.create_voice_channel(
+                    f"{emoji} {team_name}"[:100], category=category, overwrites=overwrites,
+                    reason=f"Draft teams for event '{event.name}'")
+                created[f"{team}_voice"] = voice
+        except discord.HTTPException as e:
+            log.warning("Could not create team channels for draft %s: %s", draft.id, e)
+            await channel.send("⚠️ I couldn't create the team voice channels. "
+                               "I need **Manage Roles** and **Manage Channels**.")
+        finally:
+            ids = {key: obj.id for key, obj in created.items()}
+            self.db.set_draft_teams(draft.id, ids.get("A_role"), ids.get("B_role"),
+                                    ids.get("A_voice"), ids.get("B_voice"))
+        if len(created) < 4:
+            return
+
+        for p in players:
+            role = created[f"{p.team}_role"]
+            member = await self.get_member(guild, p.user_id)
+            if member is not None:
+                try:
+                    await member.add_roles(role, reason="Draft team")
+                except discord.HTTPException as e:
+                    log.warning("Could not give team role to %s: %s", p.user_id, e)
+
+        draft = self.db.get_draft(draft.id)
+        moved, not_in_voice, failed = await self.move_to_team_channels(guild, draft, players)
+        lines = [f"🔊 Team voice channels are ready: <#{draft.team_a_voice}> and <#{draft.team_b_voice}>."]
+        if moved:
+            lines.append(f"Moved **{moved}** player(s) to their team channel.")
+        if not_in_voice:
+            lines.append("Not in voice yet: " + ", ".join(f"<@{uid}>" for uid in not_in_voice)
+                         + ". Join your team channel, or ask the organizer to run `/event move`.")
+        if failed:
+            lines.append("⚠️ I couldn't move some players. I need the **Move Members** permission.")
+        await channel.send("\n".join(lines), allowed_mentions=discord.AllowedMentions(users=True))
+
+    async def get_member(self, guild: discord.Guild, user_id: int) -> Optional[discord.Member]:
+        member = guild.get_member(user_id)
+        if member is None:
+            try:
+                member = await guild.fetch_member(user_id)
+            except discord.HTTPException:
+                return None
+        return member
+
+    async def move_to_team_channels(self, guild: discord.Guild, draft: Draft,
+                                    players: List[DraftPlayer]) -> tuple:
+        """Moves every team member who is in a voice channel. Returns (moved, not_in_voice ids, failed)."""
+        moved, not_in_voice, failed = 0, [], 0
+        voices = {"A": guild.get_channel(draft.team_a_voice), "B": guild.get_channel(draft.team_b_voice)}
+        for p in players:
+            target = voices.get(p.team)
+            member = await self.get_member(guild, p.user_id)
+            if target is None or member is None:
+                continue
+            if member.voice is None or member.voice.channel is None:
+                not_in_voice.append(p.user_id)
+                continue
+            if member.voice.channel.id == target.id:
+                continue
+            try:
+                await member.move_to(target, reason="Draft team")
+                moved += 1
+            except discord.HTTPException as e:
+                log.warning("Could not move %s: %s", p.user_id, e)
+                failed += 1
+        return moved, not_in_voice, failed
+
+    async def delete_team_channels(self, guild: discord.Guild, draft: Draft) -> None:
+        for channel_id in (draft.team_a_voice, draft.team_b_voice):
+            channel = guild.get_channel(channel_id) if channel_id else None
+            if channel is not None:
+                try:
+                    await channel.delete(reason="Draft teams removed")
+                except discord.HTTPException as e:
+                    log.warning("Could not delete team channel %s: %s", channel_id, e)
+        for role_id in (draft.team_a_role, draft.team_b_role):
+            role = guild.get_role(role_id) if role_id else None
+            if role is not None:
+                try:
+                    await role.delete(reason="Draft teams removed")
+                except discord.HTTPException as e:
+                    log.warning("Could not delete team role %s: %s", role_id, e)
+        self.db.set_draft_teams(draft.id, None, None, None, None)
 
     async def member_names(self, guild: discord.Guild, user_ids: List[int]) -> List[tuple]:
         """(user_id, display name) for each user, fetching members that aren't cached."""
         result = []
         for user_id in user_ids:
-            member = guild.get_member(user_id)
-            if member is None:
-                try:
-                    member = await guild.fetch_member(user_id)
-                except discord.HTTPException:
-                    member = None
+            member = await self.get_member(guild, user_id)
             result.append((user_id, member.display_name if member else f"User {user_id}"))
         return result
 
@@ -646,6 +761,8 @@ class Events(commands.GroupCog, group_name="event", group_description="Create an
             "• `/event reopen` to allow sign-ups again\n"
             "• `/event poll` to start a poll in this channel\n"
             "• `/event captains` to let two captains draft teams (after sign-ups are closed)\n"
+            "• `/event move` to move drafted players to their team voice channel\n"
+            "• `/event regroup` to pull everyone into your voice channel\n"
             "• `/event end` to close the event and delete this channel\n"
             "• `/event cancel` to cancel the event",
             allowed_mentions=discord.AllowedMentions.none())
@@ -808,6 +925,8 @@ class Events(commands.GroupCog, group_name="event", group_description="Create an
                         view=None)
                 except discord.HTTPException as e:
                     log.warning("Could not update replaced draft %s: %s", previous.id, e)
+        for old in self.db.drafts_with_teams(event.id):
+            await self.delete_team_channels(interaction.guild, old)
 
         players = await self.member_names(interaction.guild, participant_ids)
         draft_id = self.db.create_draft(event.id, interaction.channel_id, captain1.id, captain2.id, players)
@@ -819,6 +938,55 @@ class Events(commands.GroupCog, group_name="event", group_description="Create an
             embed=build_draft_embed(draft, draft_players), view=build_draft_view(draft, draft_players),
             allowed_mentions=discord.AllowedMentions(users=[captain1, captain2]), wait=True)
         self.db.set_draft_message(draft_id, message.id)
+
+    @app_commands.command(name="move", description="Move all drafted players who are in voice to their team channel")
+    async def move(self, interaction: discord.Interaction):
+        event = await self.event_for_organizer(interaction)
+        if event is None:
+            return
+        draft = self.db.latest_finished_draft(event.id)
+        if draft is None or not draft.team_a_voice:
+            await interaction.response.send_message(
+                "There are no team channels yet. Finish a draft with `/event captains` first.", ephemeral=True)
+            return
+        await interaction.response.defer()
+        moved, not_in_voice, failed = await self.move_to_team_channels(
+            interaction.guild, draft, self.db.draft_players(draft.id))
+        lines = [f"🔊 Moved **{moved}** player(s) to <#{draft.team_a_voice}> and <#{draft.team_b_voice}>."]
+        if not_in_voice:
+            lines.append("Not in voice: " + ", ".join(f"<@{uid}>" for uid in not_in_voice))
+        if failed:
+            lines.append("⚠️ I couldn't move some players. I need the **Move Members** permission.")
+        await interaction.followup.send("\n".join(lines), allowed_mentions=discord.AllowedMentions.none())
+
+    @app_commands.command(name="regroup", description="Pull all event players in voice into your voice channel")
+    async def regroup(self, interaction: discord.Interaction):
+        event = await self.event_for_organizer(interaction)
+        if event is None:
+            return
+        voice_state = interaction.user.voice
+        if voice_state is None or voice_state.channel is None:
+            await interaction.response.send_message(
+                "Join a voice channel first. I'll pull everyone into the channel you're in.", ephemeral=True)
+            return
+        target = voice_state.channel
+        await interaction.response.defer()
+        moved, failed = 0, 0
+        for p in self.db.participants(event.id):
+            member = await self.get_member(interaction.guild, p.user_id)
+            if member is None or member.voice is None or member.voice.channel is None:
+                continue
+            if member.voice.channel.id == target.id:
+                continue
+            try:
+                await member.move_to(target, reason="Regroup")
+                moved += 1
+            except discord.HTTPException:
+                failed += 1
+        text = f"📣 Regrouped **{moved}** player(s) into {target.mention}."
+        if failed:
+            text += " ⚠️ Some players couldn't be moved (I need **Move Members**)."
+        await interaction.followup.send(text, allowed_mentions=discord.AllowedMentions.none())
 
     @app_commands.command(name="end", description="End this event and delete its channel and role")
     async def end(self, interaction: discord.Interaction):

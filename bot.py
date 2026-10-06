@@ -12,12 +12,16 @@ log = logging.getLogger("bot")
 
 class EventBot(commands.Bot):
     def __init__(self):
-        super().__init__(command_prefix=commands.when_mentioned, intents=discord.Intents.default())
+        intents = discord.Intents.default()
+        # Reading message text is only needed for the keyword reactions (privileged intent).
+        intents.message_content = config.FUN_KEYWORDS
+        super().__init__(command_prefix=commands.when_mentioned, intents=intents)
         self.db = Database(config.DATABASE_PATH)
 
     async def setup_hook(self):
         self.add_dynamic_items(EventButton, PollSelect, ChannelPollSelect, DraftSelect)
         await self.load_extension("cogs.events")
+        await self.load_extension("cogs.fun")
 
         if config.GUILD_ID:
             guild = discord.Object(id=config.GUILD_ID)

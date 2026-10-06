@@ -64,6 +64,14 @@ CREATE TABLE IF NOT EXISTS draft_players (
     pick_no  INTEGER,           -- 0 for captains, 1.. for picks
     PRIMARY KEY (draft_id, user_id)
 );
+
+-- /bonk counter
+CREATE TABLE IF NOT EXISTS bonks (
+    guild_id INTEGER NOT NULL,
+    user_id  INTEGER NOT NULL,
+    count    INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (guild_id, user_id)
+);
 """
 
 # Columns added after the first release; added to existing databases on startup.
@@ -73,6 +81,11 @@ MIGRATIONS = [
     ("participants", "choice", "INTEGER"),  # index into poll_options
     ("events", "signups_closed", "INTEGER NOT NULL DEFAULT 0"),
     ("events", "autoclosed", "INTEGER NOT NULL DEFAULT 0"),  # sign-ups were closed at start time
+    # Team roles and voice channels created when a draft completes
+    ("drafts", "team_a_role", "INTEGER"),
+    ("drafts", "team_b_role", "INTEGER"),
+    ("drafts", "team_a_voice", "INTEGER"),
+    ("drafts", "team_b_voice", "INTEGER"),
 ]
 
 
@@ -137,6 +150,14 @@ class Draft:
     captain_a: int
     captain_b: int
     status: str
+    team_a_role: Optional[int] = None
+    team_b_role: Optional[int] = None
+    team_a_voice: Optional[int] = None
+    team_b_voice: Optional[int] = None
+
+    @property
+    def has_team_channels(self) -> bool:
+        return bool(self.team_a_voice or self.team_b_voice or self.team_a_role or self.team_b_role)
 
 
 @dataclass
@@ -357,10 +378,48 @@ class Database:
 
     def get_draft(self, draft_id: int) -> Optional[Draft]:
         row = self.conn.execute(
-            "SELECT id, event_id, channel_id, message_id, captain_a, captain_b, status "
-            "FROM drafts WHERE id = ?", (draft_id,)
+            "SELECT id, event_id, channel_id, message_id, captain_a, captain_b, status, "
+            "team_a_role, team_b_role, team_a_voice, team_b_voice FROM drafts WHERE id = ?", (draft_id,)
         ).fetchone()
         return Draft(**dict(row)) if row else None
+
+    def set_draft_teams(self, draft_id: int, team_a_role: Optional[int], team_b_role: Optional[int],
+                        team_a_voice: Optional[int], team_b_voice: Optional[int]) -> None:
+        self.conn.execute(
+            "UPDATE drafts SET team_a_role = ?, team_b_role = ?, team_a_voice = ?, team_b_voice = ? "
+            "WHERE id = ?",
+            (team_a_role, team_b_role, team_a_voice, team_b_voice, draft_id),
+        )
+        self.conn.commit()
+
+    def latest_finished_draft(self, event_id: int) -> Optional[Draft]:
+        row = self.conn.execute(
+            "SELECT id FROM drafts WHERE event_id = ? AND status = 'done' ORDER BY id DESC LIMIT 1",
+            (event_id,),
+        ).fetchone()
+        return self.get_draft(row["id"]) if row else None
+
+    def drafts_with_teams(self, event_id: int) -> List[Draft]:
+        rows = self.conn.execute(
+            "SELECT id FROM drafts WHERE event_id = ? AND (team_a_role IS NOT NULL OR team_b_role IS NOT NULL "
+            "OR team_a_voice IS NOT NULL OR team_b_voice IS NOT NULL)", (event_id,)
+        ).fetchall()
+        return [self.get_draft(r["id"]) for r in rows]
+
+    # --- bonks --------------------------------------------------------------
+
+    def add_bonk(self, guild_id: int, user_id: int) -> int:
+        """Adds a bonk and returns the user's new total."""
+        self.conn.execute(
+            "INSERT INTO bonks (guild_id, user_id, count) VALUES (?, ?, 1) "
+            "ON CONFLICT (guild_id, user_id) DO UPDATE SET count = count + 1",
+            (guild_id, user_id),
+        )
+        self.conn.commit()
+        row = self.conn.execute(
+            "SELECT count FROM bonks WHERE guild_id = ? AND user_id = ?", (guild_id, user_id)
+        ).fetchone()
+        return row["count"]
 
     def active_draft(self, event_id: int) -> Optional[Draft]:
         row = self.conn.execute(

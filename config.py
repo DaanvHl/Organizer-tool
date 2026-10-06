@@ -28,4 +28,11 @@ AUTO_CLEANUP_HOURS = float(os.getenv("AUTO_CLEANUP_HOURS", "3"))
 # Category the temporary event channels are created in (created automatically if missing).
 EVENTS_CATEGORY = os.getenv("EVENTS_CATEGORY", "Events")
 
-DATABASE_PATH = os.getenv("DATABASE_PATH", "events.db")
+# Funny reactions to words like "gg", "ez" and "lag". Needs the Message Content Intent to be
+# switched on in the Discord developer portal, otherwise the bot can't start.
+FUN_KEYWORDS = os.getenv("FUN_KEYWORDS", "false").strip().lower() in ("1", "true", "yes", "on")
+
+# Minimum seconds between keyword replies in the same channel (emoji reactions are not limited).
+KEYWORD_COOLDOWN_SECONDS = int(os.getenv("KEYWORD_COOLDOWN_SECONDS", "60"))
+
+DATABASE_PATH =os.getenv("DATABASE_PATH", "events.db")
