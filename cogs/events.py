@@ -1,14 +1,15 @@
 import logging
 import re
 import time
-from typing import Optional
+from datetime import datetime
+from typing import List, Optional
 
 import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 
 import config
-from database import Database, Event
+from database import Database, Event, Participant
 from timeparse import parse_time
 
 log = logging.getLogger(__name__)
@@ -20,7 +21,16 @@ STATUS_FOOTERS = {
 }
 
 
-def build_embed(event: Event, participants: list) -> discord.Embed:
+MAX_POLL_OPTIONS = 25  # Discord's limit for a select menu
+
+
+def truncate_field(value: str) -> str:
+    if len(value) > 1024:
+        value = value[:1000].rsplit("\n", 1)[0] + "\n…"
+    return value
+
+
+def build_embed(event: Event, participants: List[Participant]) -> discord.Embed:
     if event.active:
         title = f"🎯 {event.name}"
         color = discord.Color.orange()
@@ -32,13 +42,28 @@ def build_embed(event: Event, participants: list) -> discord.Embed:
     embed.add_field(name="When", value=f"<t:{event.start_ts}:F>\n<t:{event.start_ts}:R>", inline=True)
     embed.add_field(name="Organizer", value=f"<@{event.organizer_id}>", inline=True)
 
-    lines = [f"{i}. <@{uid}>" for i, uid in enumerate(participants, start=1)]
-    value = "\n".join(lines) or "Nobody yet"
-    if len(value) > 1024:
-        value = value[:1000].rsplit("\n", 1)[0] + "\n…"
-    embed.add_field(name=f"Players ({len(participants)})", value=value, inline=False)
+    options = event.options
+    if options:
+        counts = [0] * len(options)
+        for p in participants:
+            if p.choice is not None and 0 <= p.choice < len(options):
+                counts[p.choice] += 1
+        results = "\n".join(f"**{label}**: {count}" for label, count in zip(options, counts))
+        embed.add_field(name=f"📊 {event.poll_question}"[:256], value=truncate_field(results), inline=False)
 
-    if event.active:
+    lines = []
+    for i, p in enumerate(participants, start=1):
+        line = f"{i}. <@{p.user_id}>"
+        if options:
+            valid = p.choice is not None and 0 <= p.choice < len(options)
+            line += f" · {options[p.choice]}" if valid else " · *no choice yet*"
+        lines.append(line)
+    embed.add_field(name=f"Players ({len(participants)})",
+                    value=truncate_field("\n".join(lines) or "Nobody yet"), inline=False)
+
+    if event.active and options:
+        embed.set_footer(text="Click Join and pick an option to get access to the event channel.")
+    elif event.active:
         embed.set_footer(text="Click Join to get access to the event channel.")
     else:
         embed.set_footer(text=STATUS_FOOTERS.get(event.status, "This event is closed."))
@@ -71,6 +96,66 @@ class EventButton(discord.ui.DynamicItem[discord.ui.Button],
             await cog.handle_join(interaction, self.event_id)
         else:
             await cog.handle_leave(interaction, self.event_id)
+
+
+class PollSelect(discord.ui.DynamicItem[discord.ui.Select], template=r"event:pick:(?P<id>\d+)"):
+    """Select menu a player uses to pick a poll option when joining an event."""
+
+    def __init__(self, event_id: int, options: List[str], current: Optional[int] = None):
+        select = discord.ui.Select(
+            custom_id=f"event:pick:{event_id}",
+            placeholder="Choose an option…",
+            options=[discord.SelectOption(label=label, value=str(i), default=(i == current))
+                     for i, label in enumerate(options)],
+        )
+        super().__init__(select)
+        self.event_id = event_id
+
+    @classmethod
+    async def from_custom_id(cls, interaction: discord.Interaction, item: discord.ui.Select,
+                             match: re.Match[str], /):
+        return cls(int(match["id"]), [o.label for o in item.options])
+
+    async def callback(self, interaction: discord.Interaction):
+        cog: "Events" = interaction.client.get_cog("Events")
+        await cog.handle_pick(interaction, self.event_id, int(interaction.data["values"][0]))
+
+
+class PollModal(discord.ui.Modal, title="Event poll"):
+    question = discord.ui.TextInput(
+        label="Question", max_length=200,
+        placeholder="e.g. Which turret will you play?")
+    options = discord.ui.TextInput(
+        label="Options (one per line)", style=discord.TextStyle.paragraph, max_length=2000,
+        placeholder="Railgun\nSmoky\nFirebird\nIsida")
+
+    def __init__(self, cog: "Events", name: str, start: datetime, description: Optional[str]):
+        super().__init__(timeout=900)
+        self.cog = cog
+        self.name = name
+        self.start = start
+        self.description = description
+
+    async def on_submit(self, interaction: discord.Interaction):
+        options = []
+        for line in self.options.value.splitlines():
+            line = line.strip()
+            if line and line not in options:
+                options.append(line)
+        error = None
+        if len(options) < 2:
+            error = "A poll needs at least 2 different options (one per line)."
+        elif len(options) > MAX_POLL_OPTIONS:
+            error = f"A poll can have at most {MAX_POLL_OPTIONS} options."
+        elif any(len(o) > 100 for o in options):
+            error = "Each option can be at most 100 characters."
+        if error:
+            await interaction.response.send_message(
+                f"{error} Run `/event create` again.\n\nYour options were:\n```\n{self.options.value}\n```",
+                ephemeral=True)
+            return
+        await self.cog.create_event(interaction, self.name, self.start, self.description,
+                                    self.question.value.strip(), options)
 
 
 def event_view(event_id: int) -> discord.ui.View:
@@ -161,34 +246,66 @@ class Events(commands.GroupCog, group_name="event", group_description="Create an
     # --- buttons ------------------------------------------------------------
 
     async def handle_join(self, interaction: discord.Interaction, event_id: int):
-        await interaction.response.defer(ephemeral=True, thinking=True)
         event = self.db.get_event(event_id)
         if event is None or not event.active:
-            await interaction.followup.send("This event is no longer open.", ephemeral=True)
-            return
-        role = interaction.guild.get_role(event.role_id)
-        if role is None:
-            await interaction.followup.send("The event role is missing. Ask an admin.", ephemeral=True)
+            await interaction.response.send_message("This event is no longer open.", ephemeral=True)
             return
 
-        newly_joined = self.db.add_participant(event.id, interaction.user.id)
+        if event.has_poll:
+            # Joining happens once the player picks an option (see handle_pick).
+            current = self.db.get_choice(event.id, interaction.user.id)
+            if current is not None and 0 <= current < len(event.options):
+                intro = (f"You're already in **{event.name}** with **{event.options[current]}**. "
+                         "Pick another option to change your choice.")
+            else:
+                intro = f"Pick an option to join **{event.name}**."
+            view = discord.ui.View(timeout=None)
+            view.add_item(PollSelect(event.id, event.options, current))
+            await interaction.response.send_message(
+                f"{intro}\n📊 **{event.poll_question}**", view=view, ephemeral=True)
+            return
+
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        result = await self.join_event(interaction, event, choice=None)
+        await interaction.followup.send(result, ephemeral=True)
+
+    async def handle_pick(self, interaction: discord.Interaction, event_id: int, choice: int):
+        await interaction.response.defer()
+        event = self.db.get_event(event_id)
+        if event is None or not event.active:
+            message = "This event is no longer open."
+        elif not 0 <= choice < len(event.options):
+            message = "That option doesn't exist anymore. Click Join again."
+        else:
+            message = await self.join_event(interaction, event, choice)
+        await interaction.edit_original_response(content=message, view=None)
+
+    async def join_event(self, interaction: discord.Interaction, event: Event,
+                         choice: Optional[int]) -> str:
+        """Adds the user to the event (or updates their poll choice) and returns a reply text."""
+        role = interaction.guild.get_role(event.role_id)
+        if role is None:
+            return "The event role is missing. Ask an admin."
+
+        newly_joined = self.db.add_participant(event.id, interaction.user.id, choice)
         try:
             await interaction.user.add_roles(role, reason=f"Joined event '{event.name}'")
         except discord.HTTPException:
             if newly_joined:
                 self.db.remove_participant(event.id, interaction.user.id)
-            await interaction.followup.send(
-                "I couldn't give you the event role. Make sure my role is above the event roles "
-                "and that I have **Manage Roles**.", ephemeral=True)
-            return
+            return ("I couldn't give you the event role. Make sure my role is above the event roles "
+                    "and that I have **Manage Roles**.")
 
+        if not newly_joined and choice is None:
+            return f"You're already in this event: <#{event.channel_id}>"
         if not newly_joined:
-            await interaction.followup.send(
-                f"You're already in this event: <#{event.channel_id}>", ephemeral=True)
-            return
-        await interaction.followup.send(
-            f"You joined **{event.name}**! Head over to <#{event.channel_id}>.", ephemeral=True)
+            self.db.set_choice(event.id, interaction.user.id, choice)
         await self.refresh_announcement(event)
+
+        picked = f" with **{event.options[choice]}**" if choice is not None else ""
+        if newly_joined:
+            return f"You joined **{event.name}**{picked}! Head over to <#{event.channel_id}>."
+        return f"Your choice is now **{event.options[choice]}**. See you in <#{event.channel_id}>."
 
     async def handle_leave(self, interaction: discord.Interaction, event_id: int):
         await interaction.response.defer(ephemeral=True, thinking=True)
@@ -221,23 +338,34 @@ class Events(commands.GroupCog, group_name="event", group_description="Create an
         name="Name of the event, e.g. Clan War vs OFF",
         time="Start time, e.g. 20:00, tomorrow 20:00 or 10-10 20:00",
         description="Optional details: mode, map, rules, ...",
+        poll="Let players pick an option when they join (opens a form to enter the options)",
     )
     async def create(self, interaction: discord.Interaction,
                      name: app_commands.Range[str, 1, 80],
                      time: str,
-                     description: Optional[app_commands.Range[str, 1, 1000]] = None):
+                     description: Optional[app_commands.Range[str, 1, 1000]] = None,
+                     poll: bool = False):
         try:
             start = parse_time(time, config.TIMEZONE)
         except ValueError as e:
             await interaction.response.send_message(str(e), ephemeral=True)
             return
 
+        if poll:
+            await interaction.response.send_modal(PollModal(self, name, start, description))
+            return
+        await self.create_event(interaction, name, start, description)
+
+    async def create_event(self, interaction: discord.Interaction, name: str, start: datetime,
+                           description: Optional[str], poll_question: Optional[str] = None,
+                           poll_options: Optional[List[str]] = None):
         await interaction.response.defer(ephemeral=True, thinking=True)
         guild = interaction.guild
         organizer = interaction.user
         start_ts = int(start.timestamp())
         event_id = self.db.create_event(guild.id, name, description, organizer.id, start_ts,
-                                        reminded=reminder_already_due(start_ts))
+                                        reminded=reminder_already_due(start_ts),
+                                        poll_question=poll_question, poll_options=poll_options)
 
         role = None
         try:
@@ -283,9 +411,13 @@ class Events(commands.GroupCog, group_name="event", group_description="Create an
             return
         self.db.set_announcement(event_id, announcement.channel.id, announcement.id)
 
+        poll_note = ""
+        if poll_options:
+            poll_note = (f"📊 Poll: **{poll_question}**. {organizer.mention}, you're in already. "
+                         "Click Join on the announcement to pick your own option too.\n\n")
         await channel.send(
             f"Welcome to **{name}**, organized by {organizer.mention}! "
-            f"Starts <t:{start_ts}:F> (<t:{start_ts}:R>).\n\n"
+            f"Starts <t:{start_ts}:F> (<t:{start_ts}:R>).\n\n{poll_note}"
             "**Organizer commands** (use them in this channel):\n"
             "• `/event edit` to change the time or description\n"
             "• `/event kick` to remove a player\n"

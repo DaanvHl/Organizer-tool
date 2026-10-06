@@ -10,7 +10,7 @@ over, the channel and role are deleted.
 
 | Command | Where | Who |
 |---|---|---|
-| `/event create name time [description]` | Any channel (the poll is posted there) | Everyone |
+| `/event create name time [description] [poll]` | Any channel (the announcement is posted there) | Everyone |
 | `/event edit [time] [description]` | Inside the event channel | Organizer / admins |
 | `/event kick member` | Inside the event channel | Organizer / admins |
 | `/event end` | Inside the event channel | Organizer / admins |
@@ -19,6 +19,11 @@ over, the channel and role are deleted.
 
 Times can be written as `20:00`, `tomorrow 20:00`, `10-10 20:00` or `10-10-2026 20:00`
 (interpreted in the `TIMEZONE` from `.env`). Discord shows them to each member in their own timezone.
+
+**Poll:** set `poll: True` on `/event create` to get a form where you enter a question and the
+options (one per line, 2–25). Players who click Join must pick an option before they get access,
+and can click Join again later to change their choice. The announcement shows the results and
+each player's choice.
 
 Automatic behaviour:
 - The event role is pinged `REMINDER_MINUTES` (default 15) before the start.

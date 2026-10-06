@@ -1,3 +1,4 @@
+import json
 import os
 import sqlite3
 import time
@@ -28,6 +29,13 @@ CREATE TABLE IF NOT EXISTS participants (
 );
 """
 
+# Columns added after the first release; added to existing databases on startup.
+MIGRATIONS = [
+    ("events", "poll_question", "TEXT"),
+    ("events", "poll_options", "TEXT"),  # JSON list of option labels
+    ("participants", "choice", "INTEGER"),  # index into poll_options
+]
+
 
 @dataclass
 class Event:
@@ -43,10 +51,26 @@ class Event:
     announce_message_id: Optional[int]
     reminded: bool
     status: str  # active, ended, cancelled, expired
+    poll_question: Optional[str] = None
+    poll_options: Optional[str] = None
 
     @property
     def active(self) -> bool:
         return self.status == "active"
+
+    @property
+    def options(self) -> List[str]:
+        return json.loads(self.poll_options) if self.poll_options else []
+
+    @property
+    def has_poll(self) -> bool:
+        return bool(self.options)
+
+
+@dataclass
+class Participant:
+    user_id: int
+    choice: Optional[int]
 
 
 class Database:
@@ -58,6 +82,10 @@ class Database:
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA foreign_keys = ON")
         self.conn.executescript(SCHEMA)
+        for table, column, column_type in MIGRATIONS:
+            existing = {r["name"] for r in self.conn.execute(f"PRAGMA table_info({table})")}
+            if column not in existing:
+                self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {column_type}")
         self.conn.commit()
 
     @staticmethod
@@ -71,11 +99,14 @@ class Database:
     # --- events -------------------------------------------------------------
 
     def create_event(self, guild_id: int, name: str, description: Optional[str],
-                     organizer_id: int, start_ts: int, reminded: bool) -> int:
+                     organizer_id: int, start_ts: int, reminded: bool,
+                     poll_question: Optional[str] = None,
+                     poll_options: Optional[List[str]] = None) -> int:
         cur = self.conn.execute(
-            "INSERT INTO events (guild_id, name, description, organizer_id, start_ts, reminded) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (guild_id, name, description, organizer_id, start_ts, int(reminded)),
+            "INSERT INTO events (guild_id, name, description, organizer_id, start_ts, reminded, "
+            "poll_question, poll_options) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (guild_id, name, description, organizer_id, start_ts, int(reminded),
+             poll_question, json.dumps(poll_options) if poll_options else None),
         )
         self.conn.commit()
         return cur.lastrowid
@@ -141,14 +172,28 @@ class Database:
 
     # --- participants -------------------------------------------------------
 
-    def add_participant(self, event_id: int, user_id: int) -> bool:
+    def add_participant(self, event_id: int, user_id: int, choice: Optional[int] = None) -> bool:
         """Returns False if the user had already joined."""
         cur = self.conn.execute(
-            "INSERT OR IGNORE INTO participants (event_id, user_id, joined_ts) VALUES (?, ?, ?)",
-            (event_id, user_id, int(time.time())),
+            "INSERT OR IGNORE INTO participants (event_id, user_id, joined_ts, choice) "
+            "VALUES (?, ?, ?, ?)",
+            (event_id, user_id, int(time.time()), choice),
         )
         self.conn.commit()
         return cur.rowcount > 0
+
+    def set_choice(self, event_id: int, user_id: int, choice: int) -> None:
+        self.conn.execute(
+            "UPDATE participants SET choice = ? WHERE event_id = ? AND user_id = ?",
+            (choice, event_id, user_id),
+        )
+        self.conn.commit()
+
+    def get_choice(self, event_id: int, user_id: int) -> Optional[int]:
+        row = self.conn.execute(
+            "SELECT choice FROM participants WHERE event_id = ? AND user_id = ?", (event_id, user_id)
+        ).fetchone()
+        return row["choice"] if row else None
 
     def remove_participant(self, event_id: int, user_id: int) -> bool:
         """Returns False if the user wasn't in the event."""
@@ -158,9 +203,9 @@ class Database:
         self.conn.commit()
         return cur.rowcount > 0
 
-    def participants(self, event_id: int) -> List[int]:
+    def participants(self, event_id: int) -> List[Participant]:
         rows = self.conn.execute(
-            "SELECT user_id FROM participants WHERE event_id = ? ORDER BY joined_ts, rowid",
+            "SELECT user_id, choice FROM participants WHERE event_id = ? ORDER BY joined_ts, rowid",
             (event_id,),
         ).fetchall()
-        return [r["user_id"] for r in rows]
+        return [Participant(r["user_id"], r["choice"]) for r in rows]
