@@ -124,10 +124,10 @@ class PollSelect(discord.ui.DynamicItem[discord.ui.Select], template=r"event:pic
 class PollModal(discord.ui.Modal, title="Event poll"):
     question = discord.ui.TextInput(
         label="Question", max_length=200,
-        placeholder="e.g. Which turret will you play?")
+        placeholder="e.g. Which role do you want?")
     options = discord.ui.TextInput(
         label="Options (one per line)", style=discord.TextStyle.paragraph, max_length=2000,
-        placeholder="Railgun\nSmoky\nFirebird\nIsida")
+        placeholder="Option 1\nOption 2\nOption 3")
 
     def __init__(self, cog: "Events", name: str, start: datetime, description: Optional[str]):
         super().__init__(timeout=900)
@@ -346,9 +346,9 @@ class Events(commands.GroupCog, group_name="event", group_description="Create an
 
     @app_commands.command(name="create", description="Create an event with a join poll and a private channel")
     @app_commands.describe(
-        name="Name of the event, e.g. Clan War vs OFF",
+        name="Name of the event, e.g. Friday game night",
         time="Start time, e.g. 20:00, tomorrow 20:00 or 10-10 20:00",
-        description="Optional details: mode, map, rules, ...",
+        description="Optional details: what, where, rules, ...",
         poll="Let players pick an option when they join (opens a form to enter the options)",
     )
     async def create(self, interaction: discord.Interaction,
