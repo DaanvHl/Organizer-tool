@@ -4,7 +4,7 @@ import discord
 from discord.ext import commands
 
 import config
-from cogs.events import EventButton, PollSelect
+from cogs.events import ChannelPollSelect, DraftSelect, EventButton, PollSelect
 from database import Database
 
 log = logging.getLogger("bot")
@@ -16,7 +16,7 @@ class EventBot(commands.Bot):
         self.db = Database(config.DATABASE_PATH)
 
     async def setup_hook(self):
-        self.add_dynamic_items(EventButton, PollSelect)
+        self.add_dynamic_items(EventButton, PollSelect, ChannelPollSelect, DraftSelect)
         await self.load_extension("cogs.events")
 
         if config.GUILD_ID:

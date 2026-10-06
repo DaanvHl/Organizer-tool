@@ -13,6 +13,10 @@ over, the channel and role are deleted.
 | `/event create name time [description] [poll]` | Any channel (the announcement is posted there) | Everyone |
 | `/event edit [time] [description]` | Inside the event channel | Organizer / admins |
 | `/event kick member` | Inside the event channel | Organizer / admins |
+| `/event close` | Inside the event channel | Organizer / admins |
+| `/event reopen` | Inside the event channel | Organizer / admins |
+| `/event poll` | Inside the event channel | Organizer / admins |
+| `/event captains captain1 captain2` | Inside the event channel | Organizer / admins |
 | `/event end` | Inside the event channel | Organizer / admins |
 | `/event cancel` | Inside the event channel | Organizer / admins |
 | `/event list` | Anywhere | Everyone |
@@ -29,8 +33,23 @@ options (one per line, 2–25). Players who click Join must pick an option befor
 and can click Join again later to change their choice. The announcement shows the results and
 each player's choice.
 
+**Closing sign-ups:** `/event close` stops new people from joining. The Join button disappears,
+but the channel stays and players who already joined can still leave. Sign-ups also close
+automatically at the start time. `/event reopen` opens them again.
+
+**Polls in the event channel:** `/event poll` opens the same form as at creation and posts a poll
+in the event channel. Everyone in the channel can vote and change their vote; the results update
+live. This works whether sign-ups are open or closed.
+
+**Captains draft:** `/event captains captain1 captain2` lets two captains pick teams in snake order
+(X O O X X O O X …; captain1 picks first). Only works when sign-ups are closed, the event has at
+least 4 players and an even number of players, and both captains are in the event. Only the captain
+whose turn it is can pick; the last player is assigned automatically. Running it again replaces
+the current draft.
+
 Automatic behaviour:
 - The event role is pinged `REMINDER_MINUTES` (default 15) before the start.
+- Sign-ups close at the start time.
 - If nobody runs `/event end`, the event is closed `AUTO_CLEANUP_HOURS` (default 3) after the start.
 
 ## Setup

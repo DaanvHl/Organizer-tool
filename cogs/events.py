@@ -2,14 +2,14 @@ import logging
 import re
 import time
 from datetime import datetime
-from typing import List, Optional
+from typing import Awaitable, Callable, List, Optional
 
 import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 
 import config
-from database import Database, Event, Participant
+from database import Database, Draft, DraftPlayer, Event, Participant, Poll
 from timeparse import parse_time
 
 log = logging.getLogger(__name__)
@@ -24,9 +24,12 @@ STATUS_FOOTERS = {
 MAX_POLL_OPTIONS = 25  # Discord's limit for a select menu
 
 
-def truncate_field(value: str) -> str:
-    if len(value) > 1024:
-        value = value[:1000].rsplit("\n", 1)[0] + "\n…"
+MAX_DRAFT_POOL = 125  # 5 menus of 25 players; a message holds at most 5 rows
+
+
+def truncate_field(value: str, limit: int = 1024) -> str:
+    if len(value) > limit:
+        value = value[:limit - 24].rsplit("\n", 1)[0] + "\n…"
     return value
 
 
@@ -61,7 +64,9 @@ def build_embed(event: Event, participants: List[Participant]) -> discord.Embed:
     embed.add_field(name=f"Players ({len(participants)})",
                     value=truncate_field("\n".join(lines) or "Nobody yet"), inline=False)
 
-    if event.active and options:
+    if event.active and event.signups_closed:
+        embed.set_footer(text="🔒 Sign-ups are closed.")
+    elif event.active and options:
         embed.set_footer(text="Click Join and pick an option to get access to the event channel.")
     elif event.active:
         embed.set_footer(text="Click Join to get access to the event channel.")
@@ -121,7 +126,9 @@ class PollSelect(discord.ui.DynamicItem[discord.ui.Select], template=r"event:pic
         await cog.handle_pick(interaction, self.event_id, int(interaction.data["values"][0]))
 
 
-class PollModal(discord.ui.Modal, title="Event poll"):
+class PollModal(discord.ui.Modal, title="Poll"):
+    """Form to enter a poll question and options. Calls on_poll(interaction, question, options)."""
+
     question = discord.ui.TextInput(
         label="Question", max_length=200,
         placeholder="e.g. Which role do you want?")
@@ -129,12 +136,9 @@ class PollModal(discord.ui.Modal, title="Event poll"):
         label="Options (one per line)", style=discord.TextStyle.paragraph, max_length=2000,
         placeholder="Option 1\nOption 2\nOption 3")
 
-    def __init__(self, cog: "Events", name: str, start: datetime, description: Optional[str]):
+    def __init__(self, on_poll: Callable[[discord.Interaction, str, List[str]], Awaitable[None]]):
         super().__init__(timeout=900)
-        self.cog = cog
-        self.name = name
-        self.start = start
-        self.description = description
+        self.on_poll = on_poll
 
     async def on_submit(self, interaction: discord.Interaction):
         options = []
@@ -151,16 +155,135 @@ class PollModal(discord.ui.Modal, title="Event poll"):
             error = "Each option can be at most 100 characters."
         if error:
             await interaction.response.send_message(
-                f"{error} Run `/event create` again.\n\nYour options were:\n```\n{self.options.value}\n```",
+                f"{error} Please try again.\n\nYour options were:\n```\n{self.options.value}\n```",
                 ephemeral=True)
             return
-        await self.cog.create_event(interaction, self.name, self.start, self.description,
-                                    self.question.value.strip(), options)
+        await self.on_poll(interaction, self.question.value.strip(), options)
 
 
-def event_view(event_id: int) -> discord.ui.View:
+class ChannelPollSelect(discord.ui.DynamicItem[discord.ui.Select], template=r"poll:vote:(?P<id>\d+)"):
+    """Voting menu of a poll started with /event poll inside an event channel."""
+
+    def __init__(self, poll_id: int, options: List[str]):
+        select = discord.ui.Select(
+            custom_id=f"poll:vote:{poll_id}",
+            placeholder="Vote…",
+            options=[discord.SelectOption(label=label, value=str(i)) for i, label in enumerate(options)],
+        )
+        super().__init__(select)
+        self.poll_id = poll_id
+
+    @classmethod
+    async def from_custom_id(cls, interaction: discord.Interaction, item: discord.ui.Select,
+                             match: re.Match[str], /):
+        return cls(int(match["id"]), [o.label for o in item.options])
+
+    async def callback(self, interaction: discord.Interaction):
+        cog: "Events" = interaction.client.get_cog("Events")
+        await cog.handle_vote(interaction, self.poll_id, int(interaction.data["values"][0]))
+
+
+def build_channel_poll_embed(poll: Poll, votes: List[Participant]) -> discord.Embed:
+    options = poll.options
+    voters = [[] for _ in options]
+    for vote in votes:
+        if 0 <= vote.choice < len(options):
+            voters[vote.choice].append(vote.user_id)
+    lines = []
+    for label, user_ids in zip(options, voters):
+        line = f"**{label}**: {len(user_ids)}"
+        if user_ids:
+            line += " · " + ", ".join(f"<@{uid}>" for uid in user_ids)
+        lines.append(line)
+    embed = discord.Embed(title=f"📊 {poll.question}"[:256],
+                          description=truncate_field("\n".join(lines), 4096),
+                          color=discord.Color.blurple())
+    embed.set_footer(text=f"{len(votes)} vote(s) · Pick an option below. You can change your vote.")
+    return embed
+
+
+def draft_turn(pick_index: int) -> str:
+    """Team that makes the given (0-based) pick in a snake draft: A B B A A B B A …"""
+    return "A" if pick_index % 2 == (pick_index // 2) % 2 else "B"
+
+
+class DraftSelect(discord.ui.DynamicItem[discord.ui.Select],
+                  template=r"draft:pick:(?P<id>\d+):(?P<chunk>\d+)"):
+    """Menu a captain uses to pick a player. Large pools are split over several menus of 25."""
+
+    def __init__(self, draft_id: int, chunk: int, players: List[tuple], placeholder: str):
+        select = discord.ui.Select(
+            custom_id=f"draft:pick:{draft_id}:{chunk}",
+            placeholder=placeholder,
+            options=[discord.SelectOption(label=name[:100], value=str(uid)) for uid, name in players],
+        )
+        super().__init__(select)
+        self.draft_id = draft_id
+
+    @classmethod
+    async def from_custom_id(cls, interaction: discord.Interaction, item: discord.ui.Select,
+                             match: re.Match[str], /):
+        players = [(int(o.value), o.label) for o in item.options]
+        return cls(int(match["id"]), int(match["chunk"]), players, item.placeholder or "")
+
+    async def callback(self, interaction: discord.Interaction):
+        cog: "Events" = interaction.client.get_cog("Events")
+        await cog.handle_draft_pick(interaction, self.draft_id, int(interaction.data["values"][0]))
+
+
+def build_draft_embed(draft: Draft, players: List[DraftPlayer]) -> discord.Embed:
+    names = {p.user_id: p.name for p in players}
+    available = [p for p in players if p.team is None]
+    picks_done = sum(1 for p in players if p.pick_no)
+    total_picks = len(players) - 2
+
+    def team_lines(team: str, captain_id: int) -> str:
+        picked = sorted((p for p in players if p.team == team and p.pick_no), key=lambda p: p.pick_no)
+        lines = [f"👑 <@{captain_id}>"] + [f"{p.pick_no}. <@{p.user_id}>" for p in picked]
+        return truncate_field("\n".join(lines))
+
+    embed = discord.Embed(title="⚔️ Captains draft", color=discord.Color.red())
+    embed.add_field(name=f"Team {names.get(draft.captain_a, 'A')}"[:256],
+                    value=team_lines("A", draft.captain_a), inline=True)
+    embed.add_field(name=f"Team {names.get(draft.captain_b, 'B')}"[:256],
+                    value=team_lines("B", draft.captain_b), inline=True)
+    if available:
+        embed.add_field(name=f"Available ({len(available)})",
+                        value=truncate_field(", ".join(f"<@{p.user_id}>" for p in available)),
+                        inline=False)
+
+    if draft.status == "replaced":
+        embed.color = discord.Color.dark_grey()
+        embed.description = "This draft was replaced by a new one."
+    elif draft.status == "done" or not available:
+        embed.color = discord.Color.green()
+        embed.description = "✅ Draft complete!"
+    else:
+        team = draft_turn(picks_done)
+        captain = draft.captain_a if team == "A" else draft.captain_b
+        embed.description = f"Now picking: <@{captain}> (pick {picks_done + 1} of {total_picks})"
+        embed.set_footer(text="Snake order: X O O X X O O X … · Only the captain whose turn it is can pick.")
+    return embed
+
+
+def build_draft_view(draft: Draft, players: List[DraftPlayer]) -> Optional[discord.ui.View]:
+    available = [(p.user_id, p.name) for p in players if p.team is None]
+    if draft.status != "active" or not available:
+        return None
     view = discord.ui.View(timeout=None)
-    view.add_item(EventButton("join", event_id))
+    chunks = [available[i:i + 25] for i in range(0, len(available), 25)]
+    for index, chunk in enumerate(chunks):
+        placeholder = "Pick a player…"
+        if len(chunks) > 1:
+            placeholder = f"Pick a player ({index * 25 + 1}–{index * 25 + len(chunk)})…"
+        view.add_item(DraftSelect(draft.id, index, chunk, placeholder))
+    return view
+
+
+def event_view(event_id: int, signups_open: bool = True) -> discord.ui.View:
+    view = discord.ui.View(timeout=None)
+    if signups_open:
+        view.add_item(EventButton("join", event_id))
     view.add_item(EventButton("leave", event_id))
     return view
 
@@ -195,7 +318,8 @@ class Events(commands.GroupCog, group_name="event", group_description="Create an
 
     # --- helpers ------------------------------------------------------------
 
-    async def refresh_announcement(self, event: Event, remove_buttons: bool = False) -> None:
+    async def refresh_announcement(self, event: Event) -> None:
+        """Updates the announcement's embed and buttons to match the event's current state."""
         if not event.announce_channel_id or not event.announce_message_id:
             return
         channel = self.bot.get_channel(event.announce_channel_id)
@@ -203,11 +327,9 @@ class Events(commands.GroupCog, group_name="event", group_description="Create an
             return
         message = channel.get_partial_message(event.announce_message_id)
         embed = build_embed(event, self.db.participants(event.id))
+        view = event_view(event.id, not event.signups_closed) if event.active else None
         try:
-            if remove_buttons:
-                await message.edit(embed=embed, view=None)
-            else:
-                await message.edit(embed=embed)
+            await message.edit(embed=embed, view=view)
         except discord.HTTPException as e:
             log.warning("Could not update announcement for event %s: %s", event.id, e)
 
@@ -221,7 +343,7 @@ class Events(commands.GroupCog, group_name="event", group_description="Create an
         """Marks the event as closed and deletes its channel and role."""
         self.db.set_status(event.id, status)
         event = self.db.get_event(event.id)
-        await self.refresh_announcement(event, remove_buttons=True)
+        await self.refresh_announcement(event)
 
         guild = self.bot.get_guild(event.guild_id)
         if guild is None:
@@ -261,6 +383,9 @@ class Events(commands.GroupCog, group_name="event", group_description="Create an
         if event is None or not event.active:
             await interaction.response.send_message("This event is no longer open.", ephemeral=True)
             return
+        if event.signups_closed and not self.db.is_participant(event.id, interaction.user.id):
+            await interaction.response.send_message("🔒 Sign-ups for this event are closed.", ephemeral=True)
+            return
 
         if event.has_poll:
             # Joining happens once the player picks an option (see handle_pick).
@@ -285,6 +410,8 @@ class Events(commands.GroupCog, group_name="event", group_description="Create an
         event = self.db.get_event(event_id)
         if event is None or not event.active:
             message = "This event is no longer open."
+        elif event.signups_closed and not self.db.is_participant(event.id, interaction.user.id):
+            message = "🔒 Sign-ups for this event are closed."
         elif not 0 <= choice < len(event.options):
             message = "That option doesn't exist anymore. Click Join again."
         else:
@@ -342,6 +469,87 @@ class Events(commands.GroupCog, group_name="event", group_description="Create an
         await interaction.followup.send(f"You left **{event.name}**.", ephemeral=True)
         await self.refresh_announcement(event)
 
+    async def handle_vote(self, interaction: discord.Interaction, poll_id: int, choice: int):
+        poll = self.db.get_poll(poll_id)
+        event = self.db.get_event(poll.event_id) if poll else None
+        if poll is None or event is None or not event.active:
+            await interaction.response.send_message("This poll is closed.", ephemeral=True)
+            return
+        if not 0 <= choice < len(poll.options):
+            await interaction.response.send_message("That option doesn't exist.", ephemeral=True)
+            return
+        self.db.set_vote(poll.id, interaction.user.id, choice)
+        await interaction.response.edit_message(embed=build_channel_poll_embed(poll, self.db.votes(poll.id)))
+        await interaction.followup.send(f"You voted **{poll.options[choice]}**.", ephemeral=True)
+
+    async def handle_draft_pick(self, interaction: discord.Interaction, draft_id: int, user_id: int):
+        draft = self.db.get_draft(draft_id)
+        event = self.db.get_event(draft.event_id) if draft else None
+        if draft is None or draft.status != "active" or event is None or not event.active:
+            await interaction.response.send_message("This draft is over.", ephemeral=True)
+            return
+
+        # No awaits between reading the turn and saving the pick, so two quick clicks can't both count.
+        players = self.db.draft_players(draft.id)
+        picks_done = sum(1 for p in players if p.pick_no)
+        team = draft_turn(picks_done)
+        captain = draft.captain_a if team == "A" else draft.captain_b
+        if interaction.user.id != captain:
+            if interaction.user.id in (draft.captain_a, draft.captain_b):
+                text = f"It's not your turn. Waiting for <@{captain}> to pick."
+            else:
+                text = f"Only the captains can pick. It's <@{captain}>'s turn."
+            await interaction.response.send_message(text, ephemeral=True)
+            return
+        target = next((p for p in players if p.user_id == user_id), None)
+        if target is None or target.team is not None:
+            await interaction.response.send_message("That player was already picked.", ephemeral=True)
+            return
+
+        self.db.assign_pick(draft.id, user_id, team, picks_done + 1)
+        log_lines = [f"<@{captain}> picked <@{user_id}>."]
+        remaining = [p for p in players if p.team is None and p.user_id != user_id]
+        if len(remaining) == 1:
+            last, last_team = remaining[0], draft_turn(picks_done + 1)
+            self.db.assign_pick(draft.id, last.user_id, last_team, picks_done + 2)
+            last_captain = draft.captain_a if last_team == "A" else draft.captain_b
+            log_lines.append(f"<@{last.user_id}> is the last player and joins <@{last_captain}>'s team.")
+            remaining = []
+        if not remaining:
+            self.db.set_draft_status(draft.id, "done")
+
+        draft = self.db.get_draft(draft.id)
+        players = self.db.draft_players(draft.id)
+        await interaction.response.edit_message(
+            content=None, embed=build_draft_embed(draft, players), view=build_draft_view(draft, players))
+
+        if remaining:
+            next_team = draft_turn(picks_done + 1)
+            next_captain = draft.captain_a if next_team == "A" else draft.captain_b
+            log_lines.append(f"<@{next_captain}>, your turn to pick!")
+            mentions = discord.AllowedMentions(users=[discord.Object(next_captain)])
+        else:
+            for team_key, team_captain in (("A", draft.captain_a), ("B", draft.captain_b)):
+                members = [f"<@{p.user_id}>" for p in sorted(players, key=lambda p: p.pick_no)
+                           if p.team == team_key]
+                log_lines.append(f"**Team <@{team_captain}>**: " + ", ".join(members))
+            log_lines.insert(0, "✅ **Draft complete!**")
+            mentions = discord.AllowedMentions.none()
+        await interaction.channel.send("\n".join(log_lines), allowed_mentions=mentions)
+
+    async def member_names(self, guild: discord.Guild, user_ids: List[int]) -> List[tuple]:
+        """(user_id, display name) for each user, fetching members that aren't cached."""
+        result = []
+        for user_id in user_ids:
+            member = guild.get_member(user_id)
+            if member is None:
+                try:
+                    member = await guild.fetch_member(user_id)
+                except discord.HTTPException:
+                    member = None
+            result.append((user_id, member.display_name if member else f"User {user_id}"))
+        return result
+
     # --- commands -----------------------------------------------------------
 
     @app_commands.command(name="create", description="Create an event with a join poll and a private channel")
@@ -363,7 +571,9 @@ class Events(commands.GroupCog, group_name="event", group_description="Create an
             return
 
         if poll:
-            await interaction.response.send_modal(PollModal(self, name, start, description))
+            await interaction.response.send_modal(PollModal(
+                lambda i, question, options: self.create_event(i, name, start, description,
+                                                               question, options)))
             return
         await self.create_event(interaction, name, start, description)
 
@@ -432,6 +642,10 @@ class Events(commands.GroupCog, group_name="event", group_description="Create an
             "**Organizer commands** (use them in this channel):\n"
             "• `/event edit` to change the time or description\n"
             "• `/event kick` to remove a player\n"
+            "• `/event close` to stop new sign-ups (happens automatically at the start time)\n"
+            "• `/event reopen` to allow sign-ups again\n"
+            "• `/event poll` to start a poll in this channel\n"
+            "• `/event captains` to let two captains draft teams (after sign-ups are closed)\n"
             "• `/event end` to close the event and delete this channel\n"
             "• `/event cancel` to cancel the event",
             allowed_mentions=discord.AllowedMentions.none())
@@ -466,6 +680,8 @@ class Events(commands.GroupCog, group_name="event", group_description="Create an
             changes.append(f"New start time: <t:{event.start_ts}:F> (<t:{event.start_ts}:R>)")
         if description is not None:
             changes.append("Description updated.")
+        if time is not None and event.signups_closed:
+            changes.append("Sign-ups are still closed. Use `/event reopen` to let more people join.")
         await interaction.response.send_message(
             f"<@&{event.role_id}> 📝 Event updated!\n" + "\n".join(changes),
             allowed_mentions=discord.AllowedMentions(roles=time is not None))
@@ -495,6 +711,115 @@ class Events(commands.GroupCog, group_name="event", group_description="Create an
             allowed_mentions=discord.AllowedMentions.none())
         await self.refresh_announcement(event)
 
+    @app_commands.command(name="close", description="Close sign-ups so nobody new can join this event")
+    async def close(self, interaction: discord.Interaction):
+        event = await self.event_for_organizer(interaction)
+        if event is None:
+            return
+        if event.signups_closed:
+            await interaction.response.send_message("Sign-ups are already closed.", ephemeral=True)
+            return
+        self.db.set_signups_closed(event.id, True)
+        count = len(self.db.participants(event.id))
+        await interaction.response.send_message(
+            f"🔒 Sign-ups are closed by {interaction.user.mention}. Nobody new can join. "
+            f"Final player count: **{count}**.",
+            allowed_mentions=discord.AllowedMentions.none())
+        await self.refresh_announcement(self.db.get_event(event.id))
+
+    @app_commands.command(name="reopen", description="Open sign-ups again for this event")
+    async def reopen(self, interaction: discord.Interaction):
+        event = await self.event_for_organizer(interaction)
+        if event is None:
+            return
+        if not event.signups_closed:
+            await interaction.response.send_message("Sign-ups are already open.", ephemeral=True)
+            return
+        self.db.set_signups_closed(event.id, False)
+        await interaction.response.send_message(
+            f"🔓 Sign-ups are open again, reopened by {interaction.user.mention}.",
+            allowed_mentions=discord.AllowedMentions.none())
+        await self.refresh_announcement(self.db.get_event(event.id))
+
+    @app_commands.command(name="poll", description="Start a poll in this event channel")
+    async def channel_poll(self, interaction: discord.Interaction):
+        event = await self.event_for_organizer(interaction)
+        if event is None:
+            return
+
+        async def post_poll(modal_interaction: discord.Interaction, question: str, options: List[str]):
+            poll_id = self.db.create_poll(event.id, modal_interaction.channel_id, question, options)
+            poll = self.db.get_poll(poll_id)
+            view = discord.ui.View(timeout=None)
+            view.add_item(ChannelPollSelect(poll.id, poll.options))
+            await modal_interaction.response.send_message(
+                f"📊 New poll by {modal_interaction.user.mention}",
+                embed=build_channel_poll_embed(poll, []), view=view,
+                allowed_mentions=discord.AllowedMentions.none())
+            message = await modal_interaction.original_response()
+            self.db.set_poll_message(poll.id, message.id)
+
+        await interaction.response.send_modal(PollModal(post_poll))
+
+    @app_commands.command(name="captains", description="Start a snake draft where two captains pick their teams")
+    @app_commands.describe(captain1="Captain who picks first", captain2="Captain who picks second")
+    async def captains(self, interaction: discord.Interaction,
+                       captain1: discord.Member, captain2: discord.Member):
+        event = await self.event_for_organizer(interaction)
+        if event is None:
+            return
+
+        async def refuse(text: str):
+            await interaction.response.send_message(text, ephemeral=True)
+
+        participant_ids = [p.user_id for p in self.db.participants(event.id)]
+        count = len(participant_ids)
+        if not event.signups_closed:
+            return await refuse(
+                "🔒 Sign-ups are still open. Close them first with `/event close`, "
+                "so nobody can join while the teams are being picked.")
+        if count <= 3:
+            return await refuse(
+                f"A draft needs at least **4 players** (2 captains + 2 to pick). "
+                f"This event has only **{count}**.")
+        if count % 2:
+            return await refuse(
+                f"This event has **{count} players**, so the teams would be uneven. "
+                "Make it an even number first: remove someone with `/event kick`, "
+                "or use `/event reopen` to let one more player join.")
+        if count - 2 > MAX_DRAFT_POOL:
+            return await refuse(f"A draft can have at most {MAX_DRAFT_POOL + 2} players.")
+        if captain1.id == captain2.id:
+            return await refuse("Pick two different captains.")
+        not_in_event = [c.mention for c in (captain1, captain2) if c.id not in participant_ids]
+        if not_in_event:
+            return await refuse(f"{' and '.join(not_in_event)} isn't in this event. "
+                                "Captains must be players of the event.")
+
+        await interaction.response.defer()
+        previous = self.db.active_draft(event.id)
+        if previous is not None:
+            self.db.set_draft_status(previous.id, "replaced")
+            if previous.message_id:
+                previous = self.db.get_draft(previous.id)
+                try:
+                    await interaction.channel.get_partial_message(previous.message_id).edit(
+                        content=None, embed=build_draft_embed(previous, self.db.draft_players(previous.id)),
+                        view=None)
+                except discord.HTTPException as e:
+                    log.warning("Could not update replaced draft %s: %s", previous.id, e)
+
+        players = await self.member_names(interaction.guild, participant_ids)
+        draft_id = self.db.create_draft(event.id, interaction.channel_id, captain1.id, captain2.id, players)
+        draft = self.db.get_draft(draft_id)
+        draft_players = self.db.draft_players(draft_id)
+        message = await interaction.followup.send(
+            f"⚔️ Draft started! {captain1.mention} vs {captain2.mention}. "
+            f"{captain1.mention}, you pick first.",
+            embed=build_draft_embed(draft, draft_players), view=build_draft_view(draft, draft_players),
+            allowed_mentions=discord.AllowedMentions(users=[captain1, captain2]), wait=True)
+        self.db.set_draft_message(draft_id, message.id)
+
     @app_commands.command(name="end", description="End this event and delete its channel and role")
     async def end(self, interaction: discord.Interaction):
         event = await self.event_for_organizer(interaction)
@@ -522,7 +847,8 @@ class Events(commands.GroupCog, group_name="event", group_description="Create an
             count = len(self.db.participants(event.id))
             link = (f"https://discord.com/channels/{event.guild_id}/"
                     f"{event.announce_channel_id}/{event.announce_message_id}")
-            lines.append(f"• **[{event.name}]({link})** · <t:{event.start_ts}:F> · {count} players")
+            closed = " · 🔒 sign-ups closed" if event.signups_closed else ""
+            lines.append(f"• **[{event.name}]({link})** · <t:{event.start_ts}:F> · {count} players{closed}")
         embed = discord.Embed(title="Upcoming events", description="\n".join(lines),
                               color=discord.Color.orange())
         await interaction.response.send_message(embed=embed, ephemeral=True)
@@ -549,6 +875,20 @@ class Events(commands.GroupCog, group_name="event", group_description="Create an
                     log.info("Auto-closing event %s (%s)", event.id, event.name)
                     await self.finish_event(event, "expired")
                     continue
+
+                if not event.autoclosed and now >= event.start_ts:
+                    already_closed = event.signups_closed
+                    self.db.set_signups_closed(event.id, True, auto=True)
+                    if not already_closed:
+                        log.info("Closing sign-ups for event %s (%s)", event.id, event.name)
+                        await self.refresh_announcement(self.db.get_event(event.id))
+                        channel = self.bot.get_channel(event.channel_id)
+                        if channel is not None:
+                            count = len(self.db.participants(event.id))
+                            await channel.send(
+                                f"🔒 **{event.name}** has started, so sign-ups are now closed. "
+                                f"Final player count: **{count}**. The organizer can use "
+                                "`/event reopen` to let more people join.")
 
                 if not event.reminded and now >= event.start_ts - config.REMINDER_MINUTES * 60:
                     self.db.mark_reminded(event.id)
