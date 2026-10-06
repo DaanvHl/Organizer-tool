@@ -38,4 +38,15 @@ class EventBot(commands.Bot):
 if __name__ == "__main__":
     if not config.DISCORD_TOKEN:
         raise SystemExit("DISCORD_TOKEN is not set. Copy .env.example to .env and fill it in.")
-    EventBot().run(config.DISCORD_TOKEN, root_logger=True)
+    discord.utils.setup_logging(root=True)
+    try:
+        EventBot().run(config.DISCORD_TOKEN, log_handler=None)
+    except discord.PrivilegedIntentsRequired:
+        if not config.FUN_KEYWORDS:
+            raise
+        # Don't crash-loop: run without keyword reactions until the intent is enabled.
+        log.warning("Message Content Intent is not enabled in the Discord developer portal. "
+                    "Starting without keyword reactions. Enable it under Bot -> Privileged Gateway "
+                    "Intents, or set FUN_KEYWORDS=false to hide this warning.")
+        config.FUN_KEYWORDS = False
+        EventBot().run(config.DISCORD_TOKEN, log_handler=None)
