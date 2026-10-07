@@ -61,7 +61,8 @@ event channel, otherwise recent chatters), `/bonk member` (with lifetime bonk co
 and `/8ball question`.
 
 **Keyword reactions** (`FUN_KEYWORDS=true`): the bot reacts to words like `gg` 🫡, `bruh` 💀 and
-`noob` 🍼, and replies to `ez`, `lag`, `rigged`, `afk` and `who asked` (at most once per
+`noob` 🍼, and replies to `ez`, `lag`, `rigged`, `afk`, `who asked`, `pizdec`, `suka`, `d3s`,
+`hard3st`, `tool`, `blyat`, `naxuy` and `yebat'` (each keyword at most once per
 `KEYWORD_COOLDOWN_SECONDS` per channel). This needs **Message Content Intent** enabled in the
 developer portal (*Bot* page) — enable it *before* setting `FUN_KEYWORDS=true`, or the bot won't start.
 

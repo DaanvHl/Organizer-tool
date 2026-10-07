@@ -84,6 +84,36 @@ KEYWORDS = [
     (r"\bwho asked\b", None, [
         "🔎 Searching for who asked… 0 results found.",
     ]),
+    (r"\b(pizdec+|pizdets|pzd|пиздец)\b", None, [
+        "PIZDEC ALREADY!",
+    ]),
+    (r"\b(suka+|сука+)\b", None, [
+        "Suka?? More like Osuka!",
+    ]),
+    (r"\bd3s\b", None, [
+        "D3S control game, gg ez, no sweat, all easy!",
+    ]),
+    (r"\bhard3st\b", None, [
+        "HARD3ST = MULT3ST... 👑",
+    ]),
+    (r"\btool\b", None, [
+        "Toolek d3senko bystro bystro bystro",
+    ]),
+    (r"\b(blya+t+|blya+d|блять|бля)\b", None, [
+        "🐻 Blyat detected. Deploying emergency vodka and a balalaika.",
+        "Cyka blyat! Rush B, don't stop! 🏃",
+        "Blyat? Translation: \"I am calmly reconsidering my strategy.\" 🧘",
+    ]),
+    (r"\b(na ?[xh]uy|nakhuy|нахуй)\b", None, [
+        "🚀 Sent naxuy at Mach 3. Have a safe flight!",
+        "Naxuy? One-way ticket, no refunds. ✈️",
+        "Destination: naxuy. Estimated arrival: immediately. 📍",
+    ]),
+    (r"\b(yebat|ебать)\b", None, [
+        "Yebat'! Somebody fetch the babushka, things are getting serious. 👵",
+        "Yebat'… that's the sound of a GPU crying. 🔥",
+        "Yebat' kopat'! Calm down, comrade, it's just a game. 🫡",
+    ]),
 ]
 KEYWORD_PATTERNS = [(re.compile(p, re.IGNORECASE), emoji, replies) for p, emoji, replies in KEYWORDS]
 
@@ -92,7 +122,7 @@ class Fun(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self.db: Database = bot.db
-        self.last_keyword_reply = {}  # channel_id -> timestamp
+        self.last_keyword_reply = {}  # (channel_id, keyword pattern) -> timestamp
 
     @app_commands.command(name="excuse", description="Get an official excuse for why you lost")
     async def excuse(self, interaction: discord.Interaction):
@@ -177,9 +207,10 @@ class Fun(commands.Cog):
                     await message.add_reaction(emoji)
                 if replies:
                     now = time.monotonic()
-                    last = self.last_keyword_reply.get(message.channel.id, 0)
+                    key = (message.channel.id, pattern.pattern)
+                    last = self.last_keyword_reply.get(key, 0)
                     if now - last >= config.KEYWORD_COOLDOWN_SECONDS:
-                        self.last_keyword_reply[message.channel.id] = now
+                        self.last_keyword_reply[key] = now
                         await message.reply(random.choice(replies), mention_author=False)
             except discord.HTTPException:
                 pass
