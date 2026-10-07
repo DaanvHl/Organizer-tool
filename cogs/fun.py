@@ -102,6 +102,9 @@ KEYWORDS = [
     (r"\b(hard3st|хард3ст)\b", None, [
         "HARD3ST = MULT3ST... 👑",
     ]),
+    (r"\b(keitech|кейтек|кейтеч)\b", None, [
+        "https://tenor.com/view/fv4005-wot-wot-blitz-world-of-tanks-shrek-rizz-gif-1282590711689902998",
+    ]),
     (r"\b(tool|тул)\b", None, [
         "Toolek d3senko bystro bystro bystro",
     ]),
