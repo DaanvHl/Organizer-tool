@@ -88,7 +88,7 @@ KEYWORDS = [
     (r"\b(pizdec+|pizdets|pzd|пиздец)\b", None, [
         "PIZDEC ALREADY!",
     ]),
-    (r"\b(suka+|сука+)\b", None, [
+    (r"\b(suka+|сука+|osaka)\b", None, [
         "Suka?? More like Osuka!",
     ]),
     (r"\bd3s\b", None, [
