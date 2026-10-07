@@ -66,6 +66,9 @@ and `/8ball question`.
 `KEYWORD_COOLDOWN_SECONDS` per channel). This needs **Message Content Intent** enabled in the
 developer portal (*Bot* page) — enable it *before* setting `FUN_KEYWORDS=true`, or the bot won't start.
 
+**Sound replies** (`FUN_KEYWORDS=true`): `simple` gets the `sounds/simple-dimple.mp3` sound as a
+reply (same cooldown as the text replies). Needs the **Attach Files** permission.
+
 **Wheelchair users** (`WHEELCHAIR_USER_IDS`): every message from these user IDs gets a ♿ reaction.
 
 Automatic behaviour:
@@ -79,7 +82,7 @@ Automatic behaviour:
    *Reset Token* and copy the token. No privileged intents are needed.
 2. **Invite it**: *OAuth2 → URL Generator*, scopes `bot` + `applications.commands`, permissions
    **Manage Roles**, **Manage Channels**, **Move Members**, **View Channels**, **Send Messages**,
-   **Embed Links**, **Read Message History**, **Add Reactions**. Open the generated URL and add the bot to your server.
+   **Embed Links**, **Attach Files**, **Read Message History**, **Add Reactions**. Open the generated URL and add the bot to your server.
 3. **Role order**: in *Server Settings → Roles*, drag the bot's role near the top. It can only
    manage roles that are *below* its own role.
 4. **Configure**: copy `.env.example` to `.env` and fill in `DISCORD_TOKEN` and `GUILD_ID`

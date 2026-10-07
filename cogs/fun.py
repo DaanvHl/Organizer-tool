@@ -2,6 +2,7 @@ import logging
 import random
 import re
 import time
+from pathlib import Path
 
 import discord
 from discord import app_commands
@@ -128,6 +129,12 @@ ALWAYS_REACTIONS = [(re.compile(p, re.IGNORECASE), emoji) for p, emoji in [
     (r"\b(demonnuk|демоннук)\b", "♿"),
 ]]
 
+# Words that make the bot reply with a sound file from the sounds folder (same cooldown as replies).
+SOUNDS_DIR = Path(__file__).resolve().parent.parent / "sounds"
+SOUND_KEYWORDS = [(re.compile(p, re.IGNORECASE), SOUNDS_DIR / name) for p, name in [
+    (r"\b(simple|симпл)\b", "simple-dimple.mp3"),
+]]
+
 
 class Fun(commands.Cog):
     def __init__(self, bot: commands.Bot):
@@ -206,6 +213,15 @@ class Fun(commands.Cog):
             return
         log.exception("Error in fun command", exc_info=error)
 
+    def keyword_ready(self, channel_id: int, pattern: re.Pattern) -> bool:
+        """True (and starts the cooldown) if this keyword may reply in this channel again."""
+        now = time.monotonic()
+        key = (channel_id, pattern.pattern)
+        if now - self.last_keyword_reply.get(key, 0) < config.KEYWORD_COOLDOWN_SECONDS:
+            return False
+        self.last_keyword_reply[key] = now
+        return True
+
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
         if message.author.bot or message.guild is None:
@@ -223,19 +239,21 @@ class Fun(commands.Cog):
                     await message.add_reaction(emoji)
                 except discord.HTTPException:
                     pass
+        for pattern, sound in SOUND_KEYWORDS:
+            if pattern.search(message.content) and self.keyword_ready(message.channel.id, pattern):
+                try:
+                    await message.reply(file=discord.File(sound), mention_author=False)
+                except discord.HTTPException:
+                    log.warning("Could not send %s in channel %s (missing Attach Files permission?)",
+                                sound.name, message.channel.id)
         for pattern, emoji, replies in KEYWORD_PATTERNS:
             if not pattern.search(message.content):
                 continue
             try:
                 if emoji:
                     await message.add_reaction(emoji)
-                if replies:
-                    now = time.monotonic()
-                    key = (message.channel.id, pattern.pattern)
-                    last = self.last_keyword_reply.get(key, 0)
-                    if now - last >= config.KEYWORD_COOLDOWN_SECONDS:
-                        self.last_keyword_reply[key] = now
-                        await message.reply(random.choice(replies), mention_author=False)
+                if replies and self.keyword_ready(message.channel.id, pattern):
+                    await message.reply(random.choice(replies), mention_author=False)
             except discord.HTTPException:
                 pass
             return  # one reaction per message is enough
