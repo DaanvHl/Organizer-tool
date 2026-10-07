@@ -125,7 +125,7 @@ KEYWORD_PATTERNS = [(re.compile(p, re.IGNORECASE), emoji, replies) for p, emoji,
 # Reactions that are always added, even when the message also has a keyword from the list above.
 ALWAYS_REACTIONS = [(re.compile(p, re.IGNORECASE), emoji) for p, emoji in [
     (r"\b(softik|софтик)\b", "🐱"),
-    (r"\b(demonnuk|демоннук)\b", "🤡"),
+    (r"\b(demonnuk|демоннук)\b", "♿"),
 ]]
 
 
