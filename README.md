@@ -79,7 +79,8 @@ Automatic behaviour:
    **Embed Links**, **Read Message History**, **Add Reactions**. Open the generated URL and add the bot to your server.
 3. **Role order**: in *Server Settings → Roles*, drag the bot's role near the top. It can only
    manage roles that are *below* its own role.
-4. **Configure**: copy `.env.example` to `.env` and fill in `DISCORD_TOKEN` and `GUILD_ID`.
+4. **Configure**: copy `.env.example` to `.env` and fill in `DISCORD_TOKEN` and `GUILD_ID`
+   (one server ID, or several separated by commas).
 5. **Run**:
    ```
    python -m venv .venv

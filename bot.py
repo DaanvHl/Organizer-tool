@@ -23,13 +23,15 @@ class EventBot(commands.Bot):
         await self.load_extension("cogs.events")
         await self.load_extension("cogs.fun")
 
-        if config.GUILD_ID:
-            guild = discord.Object(id=config.GUILD_ID)
-            self.tree.copy_global_to(guild=guild)
-            synced = await self.tree.sync(guild=guild)
+        if config.GUILD_IDS:
+            for guild_id in config.GUILD_IDS:
+                guild = discord.Object(id=guild_id)
+                self.tree.copy_global_to(guild=guild)
+                synced = await self.tree.sync(guild=guild)
+                log.info("Synced %d slash command(s) to server %s", len(synced), guild_id)
         else:
             synced = await self.tree.sync()
-        log.info("Synced %d slash command(s)", len(synced))
+            log.info("Synced %d slash command(s) globally", len(synced))
 
     async def on_ready(self):
         log.info("Logged in as %s (ID %s)", self.user, self.user.id)
