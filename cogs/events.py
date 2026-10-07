@@ -26,11 +26,11 @@ MAX_POLL_OPTIONS = 25  # Discord's limit for a select menu
 
 
 LAST_PICK_LINES = [
-    "Last pick, but first in our hearts 💔",
-    "Mr. Irrelevant has entered the chat.",
-    "Someone had to be last. Today it's them.",
-    "Picked last, plays like first. Probably. Maybe.",
-    "Not picked, just... included. 🫂",
+    "Picked last, but we still love you 💔",
+    "Last one. Nobody wanted you, but you are here.",
+    "Someone has to be last. Today it is you.",
+    "Picked last, but maybe plays the best. Maybe.",
+    "Not picked. Just… added. 🫂",
 ]
 
 MAX_DRAFT_POOL = 125  # 5 menus of 25 players; a message holds at most 5 rows

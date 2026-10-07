@@ -12,52 +12,53 @@ from database import Database
 
 log = logging.getLogger(__name__)
 
+# Keep all jokes in very easy English: many players in the server don't speak English well.
 EXCUSES = [
-    "My ping spiked to 999 exactly when it mattered.",
-    "My cat walked over my keyboard.",
-    "The sun was in my eyes. Yes, indoors.",
-    "My mouse ran out of battery mid-fight.",
-    "I was testing a new strategy. It's called losing.",
-    "My teammates were clearly bots.",
-    "The enemy was hacking. Probably. Definitely.",
-    "I was playing with my monitor brightness at 2%.",
-    "My chair isn't a gaming chair, so what did you expect?",
-    "I let them win. Out of kindness.",
-    "A Discord notification scared me.",
-    "My little brother was playing. (I don't have a little brother.)",
+    "My internet was very bad.",
+    "My cat walked on my keyboard.",
+    "The sun was in my eyes. Yes, inside my house.",
+    "My mouse had no battery.",
+    "I tried a new plan. The plan was to lose.",
+    "My team played like bots.",
+    "The enemy was cheating. 100%.",
+    "My screen was too dark. I saw nothing.",
+    "My chair is not a gaming chair. What did you think?",
+    "I let them win. I am very nice.",
+    "A Discord sound made me scared.",
+    "My little brother was playing. (I have no little brother.)",
     "I was eating with one hand.",
-    "The game updated my skill level downwards.",
-    "I sneezed. Twice.",
+    "The game made me worse after the update.",
+    "I sneezed. Two times.",
 ]
 
 ROASTS = [
-    "{name} has the aim of a stormtrooper with the hiccups.",
-    "{name}'s K/D ratio is a cry for help.",
-    "{name} plays like their monitor is turned off.",
+    "{name} shoots like a blind man on a boat.",
+    "{name} dies more than they kill. Every game.",
+    "{name} plays like their screen is off.",
     "{name} is the reason the respawn button exists.",
-    "{name} once lost a 1v1 against an AFK player.",
-    "Enemies don't fear {name}. They farm them.",
-    "{name} thinks a flag is something you wave when you surrender.",
-    "{name} gets carried so often they should pay the team a delivery fee.",
-    "Scientists are still trying to figure out what {name} was aiming at.",
-    "{name}'s game sense left the server years ago.",
-    "If being bad was a rank, {name} would be Generalissimo.",
-    "{name} brings so little to the team that their absence counts as a buff.",
+    "{name} lost a 1v1 to a player who was AFK.",
+    "The enemy is not afraid of {name}. They are happy to see {name}.",
+    "{name} only uses the white flag. 🏳️",
+    "{name} gets carried so much, they should pay the team.",
+    "Nobody knows what {name} was shooting at. Not even {name}.",
+    "{name} has no brain in this game.",
+    "If being bad was a rank, {name} would be the general.",
+    "When {name} leaves, the team gets better.",
 ]
 
 BLAME_REASONS = [
-    "The evidence is overwhelming.",
-    "No further questions.",
-    "The court has spoken. 🔨",
-    "Don't even try to deny it.",
-    "Witnesses saw everything.",
-    "Case closed.",
+    "We have proof.",
+    "No more questions.",
+    "The judge says so. 🔨",
+    "Don't say no. We know.",
+    "Everybody saw it.",
+    "The end.",
 ]
 
 EIGHT_BALL = [
-    "It is certain.", "Without a doubt.", "Yes, definitely.", "Most likely.", "Signs point to yes.",
-    "Ask again later.", "Better not tell you now.", "Cannot predict now.",
-    "Don't count on it.", "My sources say no.", "Very doubtful.", "Absolutely not. 💀",
+    "Yes!", "100% yes.", "Yes, for sure.", "Probably yes.", "I think yes.",
+    "Ask me later.", "I won't tell you now. 🤫", "I don't know.",
+    "I don't think so.", "No.", "Probably not.", "NO. Never. 💀",
 ]
 
 # Keyword reactions (only active when FUN_KEYWORDS=true). Each entry: (pattern, reaction emoji or None, replies)
@@ -66,23 +67,23 @@ KEYWORDS = [
     (r"\bbruh\b", "💀", []),
     (r"\bnoob\b", "🍼", []),
     (r"\bez\b", None, [
-        "ez? Bold words from someone who died 40 times. 📉",
-        "Ez for you, emotional damage for them.",
-        "Calm down, it was one game. 😌",
+        "ez? You died 40 times. 📉",
+        "Easy for you, sad for them. 😢",
+        "Calm down, it was only one game. 😌",
     ]),
     (r"\blag+(y|ging)?\b", None, [
-        "📶 Ah yes, the lag. Excuse #1 in the official excuse book. Try `/excuse` for more.",
-        "Lag? Or skill issue? 🤔",
+        "📶 Lag. The number 1 excuse. Try `/excuse` for more.",
+        "Lag? Or are you just bad? 🤔",
     ]),
     (r"\brigged\b", None, [
-        "🤫 Nothing is rigged. Please stop asking.",
-        "The system is perfectly fair. Especially for me. 🤖",
+        "🤫 It is not rigged. Stop asking.",
+        "It is fair. Very fair. For me. 🤖",
     ]),
     (r"\bafk\b", None, [
-        "💤 Another soldier has left the battlefield. Rest in peace.",
+        "💤 One more soldier is gone. Bye bye.",
     ]),
     (r"\bwho asked\b", None, [
-        "🔎 Searching for who asked… 0 results found.",
+        "🔎 Looking for who asked… nobody found.",
     ]),
     (r"\b(pizdec+|pizdets|pzd|пиздец)\b", None, [
         "PIZDEC ALREADY!",
@@ -100,19 +101,19 @@ KEYWORDS = [
         "Toolek d3senko bystro bystro bystro",
     ]),
     (r"\b(blya+t+|blya+d|блять|бля)\b", None, [
-        "🐻 Blyat detected. Deploying emergency vodka and a balalaika.",
+        "🐻 Blyat! Quick, bring the vodka!",
         "Cyka blyat! Rush B, don't stop! 🏃",
-        "Blyat? Translation: \"I am calmly reconsidering my strategy.\" 🧘",
+        "Blyat? Calm down, take a deep breath. 🧘",
     ]),
     (r"\b(na ?[xh]uy|nakhuy|нахуй)\b", None, [
-        "🚀 Sent naxuy at Mach 3. Have a safe flight!",
-        "Naxuy? One-way ticket, no refunds. ✈️",
-        "Destination: naxuy. Estimated arrival: immediately. 📍",
+        "🚀 Naxuy! Fly fast, fly far!",
+        "Naxuy? OK, you can go. No coming back. ✈️",
+        "Going naxuy now. Bye bye! 👋",
     ]),
-    (r"\b(yebat|ебать)\b", None, [
-        "Yebat'! Somebody fetch the babushka, things are getting serious. 👵",
-        "Yebat'… that's the sound of a GPU crying. 🔥",
-        "Yebat' kopat'! Calm down, comrade, it's just a game. 🫡",
+    (r"\b(yebat|ebat|ебать)\b", None, [
+        "Yebat'! Call babushka, this is serious! 👵",
+        "Yebat'… my computer is on fire. 🔥",
+        "Yebat' kopat'! Calm down, it's only a game. 🫡",
     ]),
 ]
 KEYWORD_PATTERNS = [(re.compile(p, re.IGNORECASE), emoji, replies) for p, emoji, replies in KEYWORDS]
@@ -124,13 +125,13 @@ class Fun(commands.Cog):
         self.db: Database = bot.db
         self.last_keyword_reply = {}  # (channel_id, keyword pattern) -> timestamp
 
-    @app_commands.command(name="excuse", description="Get an official excuse for why you lost")
+    @app_commands.command(name="excuse", description="Get an excuse for why you lost")
     async def excuse(self, interaction: discord.Interaction):
         await interaction.response.send_message(
-            f"🧾 {interaction.user.mention}'s official excuse: *{random.choice(EXCUSES)}*",
+            f"🧾 {interaction.user.mention}'s excuse: *{random.choice(EXCUSES)}*",
             allowed_mentions=discord.AllowedMentions.none())
 
-    @app_commands.command(name="roast", description="Roast someone (with love)")
+    @app_commands.command(name="roast", description="Say something mean (for fun) about someone")
     @app_commands.describe(member="Who to roast")
     @app_commands.checks.cooldown(2, 30, key=lambda i: (i.guild_id, i.user.id))
     async def roast(self, interaction: discord.Interaction, member: discord.Member):
@@ -140,7 +141,7 @@ class Fun(commands.Cog):
             text = f"🔥 {random.choice(ROASTS).format(name=member.mention)}"
         await interaction.response.send_message(text)
 
-    @app_commands.command(name="blame", description="Find out whose fault it really was")
+    @app_commands.command(name="blame", description="Find out who made the team lose")
     @app_commands.checks.cooldown(2, 30, key=lambda i: (i.guild_id, i.user.id))
     async def blame(self, interaction: discord.Interaction):
         await interaction.response.defer()
@@ -157,31 +158,31 @@ class Fun(commands.Cog):
                 pass
         target = random.choice(sorted(candidates)) if candidates else interaction.user.id
         await interaction.followup.send(
-            f"🔍 Investigating the loss…\n📋 Verdict: it was **<@{target}>**'s fault. "
+            f"🔍 Who made us lose?…\n📋 It was **<@{target}>**! "
             f"{random.choice(BLAME_REASONS)}",
             allowed_mentions=discord.AllowedMentions(users=[discord.Object(target)]))
 
     @app_commands.command(name="bonk", description="Bonk someone")
-    @app_commands.describe(member="Who deserves a bonk")
+    @app_commands.describe(member="Who to bonk")
     @app_commands.checks.cooldown(3, 60, key=lambda i: (i.guild_id, i.user.id))
     async def bonk(self, interaction: discord.Interaction, member: discord.Member):
         if member.id == self.bot.user.id:
-            target, prefix = interaction.user, "You tried to bonk me? Reverse card. "
+            target, prefix = interaction.user, "You want to bonk me? No, I bonk you. "
         else:
             target, prefix = member, ""
         total = self.db.add_bonk(interaction.guild_id, target.id)
         await interaction.response.send_message(
-            f"{prefix}🔨 **BONK!** {target.mention} has been bonked. Lifetime bonks: **{total}**")
+            f"{prefix}🔨 **BONK!** {target.mention} got bonked. Total bonks: **{total}**")
 
     @app_commands.command(name="coinflip", description="Flip a coin")
     async def coinflip(self, interaction: discord.Interaction):
         if random.random() < 0.01:
-            await interaction.response.send_message("🪙 The coin landed on its **side**. Nobody wins. 😐")
+            await interaction.response.send_message("🪙 The coin is standing on its **side**. Nobody wins. 😐")
             return
         await interaction.response.send_message(f"🪙 **{random.choice(['Heads', 'Tails'])}**!")
 
     @app_commands.command(name="8ball", description="Ask the magic 8-ball a question")
-    @app_commands.describe(question="Your yes/no question")
+    @app_commands.describe(question="A question with a yes or no answer")
     async def eight_ball(self, interaction: discord.Interaction, question: app_commands.Range[str, 1, 200]):
         await interaction.response.send_message(
             f"❓ *{question}*\n🎱 {random.choice(EIGHT_BALL)}",
@@ -191,7 +192,7 @@ class Fun(commands.Cog):
                                     error: app_commands.AppCommandError):
         if isinstance(error, app_commands.CommandOnCooldown):
             await interaction.response.send_message(
-                f"Chill 🧊 Try again in {error.retry_after:.0f}s.", ephemeral=True)
+                f"Slow down 🧊 Try again in {error.retry_after:.0f} seconds.", ephemeral=True)
             return
         log.exception("Error in fun command", exc_info=error)
 
