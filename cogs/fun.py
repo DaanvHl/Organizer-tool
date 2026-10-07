@@ -62,58 +62,59 @@ EIGHT_BALL = [
 ]
 
 # Keyword reactions (only active when FUN_KEYWORDS=true). Each entry: (pattern, reaction emoji or None, replies)
+# Every keyword also has its Cyrillic (Russian) spelling.
 KEYWORDS = [
-    (r"\bgg\b", "🫡", []),
-    (r"\bbruh\b", "💀", []),
-    (r"\bnoob\b", "🍼", []),
-    (r"\bez\b", None, [
+    (r"\b(gg|гг)\b", "🫡", []),
+    (r"\b(bruh|брух)\b", "💀", []),
+    (r"\b(noob|нуб|нубас)\b", "🍼", []),
+    (r"\b(ez|изи)\b", None, [
         "ez? You died 40 times. 📉",
         "Easy for you, sad for them. 😢",
         "Calm down, it was only one game. 😌",
     ]),
-    (r"\blag+(y|ging)?\b", None, [
+    (r"\b(lag+(y|ging)?|лаг+(и+|ает|ают|ов|ал|ала|ало|нул)?)\b", None, [
         "📶 Lag. The number 1 excuse. Try `/excuse` for more.",
         "Lag? Or are you just bad? 🤔",
     ]),
-    (r"\brigged\b", None, [
+    (r"\b(rigged|подстава|подкрутка|подкручено)\b", None, [
         "🤫 It is not rigged. Stop asking.",
         "It is fair. Very fair. For me. 🤖",
     ]),
-    (r"\bafk\b", None, [
+    (r"\b(afk|афк)\b", None, [
         "💤 One more soldier is gone. Bye bye.",
     ]),
-    (r"\bwho asked\b", None, [
+    (r"\b(who asked|кто спрашивал)\b", None, [
         "🔎 Looking for who asked… nobody found.",
     ]),
-    (r"\b(pizdec+|pizdets|pzd|пиздец)\b", None, [
+    (r"\b(pizdec+|pizdets|pzd|пиздец+|пзд)\b", None, [
         "PIZDEC ALREADY!",
     ]),
     (r"\b(suka+|сука+)\b", None, [
         "Suka?? More like Osuka!",
     ]),
-    (r"\bosaka\b", None, [
+    (r"\b(osaka|осака)\b", None, [
         "Osaka?? More like Osuka!",
     ]),
-    (r"\bd3s\b", None, [
+    (r"\b(d3s|д3с)\b", None, [
         "D3S control game, gg ez, no sweat, all easy!",
     ]),
-    (r"\bhard3st\b", None, [
+    (r"\b(hard3st|хард3ст)\b", None, [
         "HARD3ST = MULT3ST... 👑",
     ]),
-    (r"\btool\b", None, [
+    (r"\b(tool|тул)\b", None, [
         "Toolek d3senko bystro bystro bystro",
     ]),
-    (r"\b(blya+t+|blya+d|блять|бля)\b", None, [
+    (r"\b(blya+t+|blya+d|бля+ть|бля+дь|бля+)\b", None, [
         "🐻 Blyat! Quick, bring the vodka!",
         "Cyka blyat! Rush B, don't stop! 🏃",
         "Blyat? Calm down, take a deep breath. 🧘",
     ]),
-    (r"\b(na ?[xh]uy|nakhuy|нахуй)\b", None, [
+    (r"\b(na ?[xh]uy|nakhuy|на ?хуй)\b", None, [
         "🚀 Naxuy! Fly fast, fly far!",
         "Naxuy? OK, you can go. No coming back. ✈️",
         "Going naxuy now. Bye bye! 👋",
     ]),
-    (r"\b(yebat|ebat|ебать)\b", None, [
+    (r"\b(yebat|ebat|[её]бать)\b", None, [
         "Yebat'! Call babushka, this is serious! 👵",
         "Yebat'… my computer is on fire. 🔥",
         "Yebat' kopat'! Calm down, it's only a game. 🫡",
