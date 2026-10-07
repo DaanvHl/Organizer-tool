@@ -66,6 +66,8 @@ and `/8ball question`.
 `KEYWORD_COOLDOWN_SECONDS` per channel). This needs **Message Content Intent** enabled in the
 developer portal (*Bot* page) — enable it *before* setting `FUN_KEYWORDS=true`, or the bot won't start.
 
+**Wheelchair users** (`WHEELCHAIR_USER_IDS`): every message from these user IDs gets a ♿ reaction.
+
 Automatic behaviour:
 - The event role is pinged `REMINDER_MINUTES` (default 15) before the start.
 - Sign-ups close at the start time.

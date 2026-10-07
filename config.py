@@ -36,4 +36,9 @@ FUN_KEYWORDS = os.getenv("FUN_KEYWORDS", "false").strip().lower() in ("1", "true
 # Minimum seconds between replies to the same keyword in the same channel (emoji reactions are not limited).
 KEYWORD_COOLDOWN_SECONDS = int(os.getenv("KEYWORD_COOLDOWN_SECONDS", "60"))
 
+# Users whose every message gets a ♿ reaction, separated by commas (right-click user -> Copy User ID).
+WHEELCHAIR_USER_IDS = {
+    int(part) for part in os.getenv("WHEELCHAIR_USER_IDS", "").replace(" ", ",").split(",") if part.strip()
+}
+
 DATABASE_PATH =os.getenv("DATABASE_PATH", "events.db")

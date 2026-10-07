@@ -208,7 +208,14 @@ class Fun(commands.Cog):
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
-        if not config.FUN_KEYWORDS or message.author.bot or message.guild is None:
+        if message.author.bot or message.guild is None:
+            return
+        if message.author.id in config.WHEELCHAIR_USER_IDS:
+            try:
+                await message.add_reaction("♿")
+            except discord.HTTPException:
+                pass
+        if not config.FUN_KEYWORDS:
             return
         for pattern, emoji in ALWAYS_REACTIONS:
             if pattern.search(message.content):
