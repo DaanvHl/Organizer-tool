@@ -248,7 +248,7 @@ def build_draft_embed(draft: Draft, players: List[DraftPlayer]) -> discord.Embed
 
     def team_lines(team: str, captain_id: int) -> str:
         picked = sorted((p for p in players if p.team == team and p.pick_no), key=lambda p: p.pick_no)
-        lines = [f"👑 <@{captain_id}>"] + [f"{p.pick_no}. <@{p.user_id}>" for p in picked]
+        lines = [f"👑 <@{captain_id}>"] + [f"{i}. <@{p.user_id}>" for i, p in enumerate(picked, start=1)]
         return truncate_field("\n".join(lines))
 
     embed = discord.Embed(title="⚔️ Captains draft", color=discord.Color.red())
