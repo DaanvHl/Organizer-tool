@@ -122,6 +122,11 @@ KEYWORDS = [
 ]
 KEYWORD_PATTERNS = [(re.compile(p, re.IGNORECASE), emoji, replies) for p, emoji, replies in KEYWORDS]
 
+# Reactions that are always added, even when the message also has a keyword from the list above.
+ALWAYS_REACTIONS = [(re.compile(p, re.IGNORECASE), emoji) for p, emoji in [
+    (r"\b(softik|софтик)\b", "🐱"),
+]]
+
 
 class Fun(commands.Cog):
     def __init__(self, bot: commands.Bot):
@@ -204,6 +209,12 @@ class Fun(commands.Cog):
     async def on_message(self, message: discord.Message):
         if not config.FUN_KEYWORDS or message.author.bot or message.guild is None:
             return
+        for pattern, emoji in ALWAYS_REACTIONS:
+            if pattern.search(message.content):
+                try:
+                    await message.add_reaction(emoji)
+                except discord.HTTPException:
+                    pass
         for pattern, emoji, replies in KEYWORD_PATTERNS:
             if not pattern.search(message.content):
                 continue
