@@ -66,7 +66,7 @@ EIGHT_BALL = [
 KEYWORDS = [
     (r"\b(gg|гг)\b", "🫡", []),
     (r"\b(bruh|брух)\b", "💀", []),
-    (r"\b(noob|нуб|нубас)\b", "🍼", []),
+    (r"\b(noob|нуб|нубас|bot|бот|mult|мульт)\b", "🍼", []),
     (r"\b(ez|изи)\b", None, [
         "ez? You died 40 times. 📉",
         "Easy for you, sad for them. 😢",
