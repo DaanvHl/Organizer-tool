@@ -277,6 +277,10 @@ class Database:
         ).fetchone()
         return row is not None
 
+    def set_organizer(self, event_id: int, user_id: int) -> None:
+        self.conn.execute("UPDATE events SET organizer_id = ? WHERE id = ?", (user_id, event_id))
+        self.conn.commit()
+
     def set_status(self, event_id: int, status: str) -> None:
         self.conn.execute("UPDATE events SET status = ? WHERE id = ?", (status, event_id))
         self.conn.commit()
@@ -420,6 +424,21 @@ class Database:
             "SELECT count FROM bonks WHERE guild_id = ? AND user_id = ?", (guild_id, user_id)
         ).fetchone()
         return row["count"]
+
+    def bonk_leaderboard(self, guild_id: int, limit: int, offset: int = 0) -> List[tuple]:
+        """(user_id, count) for the most bonked users in the server, most bonks first."""
+        rows = self.conn.execute(
+            "SELECT user_id, count FROM bonks WHERE guild_id = ? AND count > 0 "
+            "ORDER BY count DESC, user_id LIMIT ? OFFSET ?",
+            (guild_id, limit, offset),
+        ).fetchall()
+        return [(r["user_id"], r["count"]) for r in rows]
+
+    def bonked_user_count(self, guild_id: int) -> int:
+        row = self.conn.execute(
+            "SELECT COUNT(*) AS n FROM bonks WHERE guild_id = ? AND count > 0", (guild_id,)
+        ).fetchone()
+        return row["n"]
 
     def active_draft(self, event_id: int) -> Optional[Draft]:
         row = self.conn.execute(

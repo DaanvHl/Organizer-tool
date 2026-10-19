@@ -13,6 +13,7 @@ over, the channel and role are deleted.
 | `/event create name time [description] [poll]` | Any channel (the announcement is posted there) | Everyone |
 | `/event edit [time] [description]` | Inside the event channel | Organizer / admins |
 | `/event kick member` | Inside the event channel | Organizer / admins |
+| `/event transfer member` | Inside the event channel | Organizer / admins |
 | `/event close` | Inside the event channel | Organizer / admins |
 | `/event reopen` | Inside the event channel | Organizer / admins |
 | `/event poll` | Inside the event channel | Organizer / admins |
@@ -34,6 +35,9 @@ commands, so organizers can still edit, end or cancel their event there.
 options (one per line, 2–25). Players who click Join must pick an option before they get access,
 and can click Join again later to change their choice. The announcement shows the results and
 each player's choice.
+
+**New organizer:** `/event transfer member` makes another player in the event the organizer. The
+old organizer becomes a normal player and can leave the event with the Leave button.
 
 **Closing sign-ups:** `/event close` stops new people from joining. The Join button disappears,
 but the channel stays and players who already joined can still leave. Sign-ups also close
@@ -57,7 +61,8 @@ channels and roles are deleted when the event ends or a new draft starts.
 ## Fun commands
 
 Usable anywhere: `/excuse`, `/roast member`, `/blame` (picks a random culprit: event players in an
-event channel, otherwise recent chatters), `/bonk member` (with lifetime bonk counter), `/coinflip`
+event channel, otherwise recent chatters), `/bonk member` (with lifetime bonk counter), `/bonkboard`
+(the most bonked players, 10 per page), `/coinflip`
 and `/8ball question`.
 
 **Keyword reactions** (`FUN_KEYWORDS=true`): the bot reacts to words like `gg` 🫡, `bruh` 💀 and

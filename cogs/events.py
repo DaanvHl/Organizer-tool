@@ -464,7 +464,8 @@ class Events(commands.GroupCog, group_name="event", group_description="Create an
             return
         if interaction.user.id == event.organizer_id:
             await interaction.followup.send(
-                "You're the organizer. Use `/event cancel` in the event channel if it's not happening.",
+                "You're the organizer, so you can't leave. First make someone else the organizer with "
+                "`/event transfer` in the event channel. Or use `/event cancel` if the event is not happening.",
                 ephemeral=True)
             return
         if not self.db.remove_participant(event.id, interaction.user.id):
@@ -757,6 +758,7 @@ class Events(commands.GroupCog, group_name="event", group_description="Create an
             "**Organizer commands** (use them in this channel):\n"
             "• `/event edit` to change the time or description\n"
             "• `/event kick` to remove a player\n"
+            "• `/event transfer` to make another player the organizer (then you can leave)\n"
             "• `/event close` to stop new sign-ups (happens automatically at the start time)\n"
             "• `/event reopen` to allow sign-ups again\n"
             "• `/event poll` to start a poll in this channel\n"
@@ -827,6 +829,44 @@ class Events(commands.GroupCog, group_name="event", group_description="Create an
             f"{member.mention} was removed from the event.",
             allowed_mentions=discord.AllowedMentions.none())
         await self.refresh_announcement(event)
+
+    @app_commands.command(name="transfer", description="Make another player the organizer of this event")
+    @app_commands.describe(member="The player who becomes the new organizer (must be in the event)")
+    async def transfer(self, interaction: discord.Interaction, member: discord.Member):
+        event = await self.event_for_organizer(interaction)
+        if event is None:
+            return
+        if member.id == event.organizer_id:
+            await interaction.response.send_message(
+                f"{member.mention} is already the organizer.", ephemeral=True)
+            return
+        if member.bot:
+            await interaction.response.send_message("A bot can't be the organizer.", ephemeral=True)
+            return
+        if not self.db.is_participant(event.id, member.id):
+            await interaction.response.send_message(
+                f"{member.mention} is not in this event. They must join first.", ephemeral=True)
+            return
+
+        old_id = event.organizer_id
+        self.db.set_organizer(event.id, member.id)
+        await interaction.response.send_message(
+            f"👑 {member.mention} is the new organizer of **{event.name}**! "
+            f"<@{old_id}> is a normal player now and can leave the event.",
+            allowed_mentions=discord.AllowedMentions(users=[member]))
+
+        # The organizer has their own channel permission besides the event role. Move it to the new
+        # organizer, so the old one loses access once they leave the event.
+        reason = f"Organizer of event '{event.name}' changed by {interaction.user}"
+        try:
+            old = await self.get_member(interaction.guild, old_id)
+            if old is not None:
+                await interaction.channel.set_permissions(old, overwrite=None, reason=reason)
+            await interaction.channel.set_permissions(
+                member, view_channel=True, send_messages=True, read_message_history=True, reason=reason)
+        except discord.HTTPException as e:
+            log.warning("Could not move organizer permissions for event %s: %s", event.id, e)
+        await self.refresh_announcement(self.db.get_event(event.id))
 
     @app_commands.command(name="close", description="Close sign-ups so nobody new can join this event")
     async def close(self, interaction: discord.Interaction):
