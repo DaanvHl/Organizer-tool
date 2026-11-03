@@ -45,24 +45,42 @@ CREATE TABLE IF NOT EXISTS poll_votes (
     PRIMARY KEY (poll_id, user_id)
 );
 
--- Captains drafts started with /event captains
-CREATE TABLE IF NOT EXISTS drafts (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    event_id   INTEGER NOT NULL REFERENCES events(id) ON DELETE CASCADE,
-    channel_id INTEGER NOT NULL,
-    message_id INTEGER,
-    captain_a  INTEGER NOT NULL,
-    captain_b  INTEGER NOT NULL,
-    status     TEXT    NOT NULL DEFAULT 'active'  -- active, done, replaced
+-- Captains games started with /captains: queue -> captains -> drafting -> playing -> reported -> done
+CREATE TABLE IF NOT EXISTS lobbies (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    guild_id         INTEGER NOT NULL,
+    channel_id       INTEGER NOT NULL,
+    creator_id       INTEGER NOT NULL,
+    event_id         INTEGER REFERENCES events(id) ON DELETE SET NULL,  -- set when started in an event channel
+    queue_message_id INTEGER,
+    draft_message_id INTEGER,
+    status           TEXT    NOT NULL DEFAULT 'queue',  -- queue, captains, drafting, playing, reported, done, cancelled
+    captain_a        INTEGER,
+    captain_b        INTEGER,
+    winner           TEXT,     -- 'A' or 'B' once a win is reported
+    reported_by      INTEGER,
+    team_a_role      INTEGER,
+    team_b_role      INTEGER,
+    team_a_voice     INTEGER,
+    team_b_voice     INTEGER
 );
 
-CREATE TABLE IF NOT EXISTS draft_players (
-    draft_id INTEGER NOT NULL REFERENCES drafts(id) ON DELETE CASCADE,
+CREATE TABLE IF NOT EXISTS lobby_players (
+    lobby_id INTEGER NOT NULL REFERENCES lobbies(id) ON DELETE CASCADE,
     user_id  INTEGER NOT NULL,
     name     TEXT    NOT NULL,
     team     TEXT,              -- 'A', 'B' or NULL while still available
     pick_no  INTEGER,           -- 0 for captains, 1.. for picks
-    PRIMARY KEY (draft_id, user_id)
+    PRIMARY KEY (lobby_id, user_id)
+);
+
+-- Wins and losses from approved /captains games
+CREATE TABLE IF NOT EXISTS player_stats (
+    guild_id INTEGER NOT NULL,
+    user_id  INTEGER NOT NULL,
+    wins     INTEGER NOT NULL DEFAULT 0,
+    losses   INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (guild_id, user_id)
 );
 
 -- /bonk counter
@@ -81,11 +99,6 @@ MIGRATIONS = [
     ("participants", "choice", "INTEGER"),  # index into poll_options
     ("events", "signups_closed", "INTEGER NOT NULL DEFAULT 0"),
     ("events", "autoclosed", "INTEGER NOT NULL DEFAULT 0"),  # sign-ups were closed at start time
-    # Team roles and voice channels created when a draft completes
-    ("drafts", "team_a_role", "INTEGER"),
-    ("drafts", "team_b_role", "INTEGER"),
-    ("drafts", "team_a_voice", "INTEGER"),
-    ("drafts", "team_b_voice", "INTEGER"),
 ]
 
 
@@ -142,26 +155,33 @@ class Poll:
 
 
 @dataclass
-class Draft:
+class Lobby:
     id: int
-    event_id: int
+    guild_id: int
     channel_id: int
-    message_id: Optional[int]
-    captain_a: int
-    captain_b: int
+    creator_id: int
+    event_id: Optional[int]
+    queue_message_id: Optional[int]
+    draft_message_id: Optional[int]
     status: str
+    captain_a: Optional[int]
+    captain_b: Optional[int]
+    winner: Optional[str]
+    reported_by: Optional[int]
     team_a_role: Optional[int] = None
     team_b_role: Optional[int] = None
     team_a_voice: Optional[int] = None
     team_b_voice: Optional[int] = None
 
-    @property
-    def has_team_channels(self) -> bool:
-        return bool(self.team_a_voice or self.team_b_voice or self.team_a_role or self.team_b_role)
+    def captain_of(self, team: str) -> Optional[int]:
+        return self.captain_a if team == "A" else self.captain_b
+
+    def team_of_captain(self, user_id: int) -> Optional[str]:
+        return "A" if user_id == self.captain_a else "B" if user_id == self.captain_b else None
 
 
 @dataclass
-class DraftPlayer:
+class LobbyPlayer:
     user_id: int
     name: str
     team: Optional[str]
@@ -353,62 +373,113 @@ class Database:
         ).fetchall()
         return [Participant(r["user_id"], r["choice"]) for r in rows]
 
-    # --- drafts -------------------------------------------------------------
+    # --- captains lobbies ---------------------------------------------------
 
-    def create_draft(self, event_id: int, channel_id: int, captain_a: int, captain_b: int,
-                     players: List[tuple]) -> int:
-        """players: (user_id, name) for everyone in the draft, captains included."""
+    def create_lobby(self, guild_id: int, channel_id: int, creator_id: int, event_id: Optional[int]) -> int:
         cur = self.conn.execute(
-            "INSERT INTO drafts (event_id, channel_id, captain_a, captain_b) VALUES (?, ?, ?, ?)",
-            (event_id, channel_id, captain_a, captain_b),
+            "INSERT INTO lobbies (guild_id, channel_id, creator_id, event_id) VALUES (?, ?, ?, ?)",
+            (guild_id, channel_id, creator_id, event_id),
         )
-        draft_id = cur.lastrowid
-        for user_id, name in players:
-            team = "A" if user_id == captain_a else "B" if user_id == captain_b else None
-            self.conn.execute(
-                "INSERT INTO draft_players (draft_id, user_id, name, team, pick_no) VALUES (?, ?, ?, ?, ?)",
-                (draft_id, user_id, name, team, 0 if team else None),
-            )
         self.conn.commit()
-        return draft_id
+        return cur.lastrowid
 
-    def set_draft_message(self, draft_id: int, message_id: int) -> None:
-        self.conn.execute("UPDATE drafts SET message_id = ? WHERE id = ?", (message_id, draft_id))
-        self.conn.commit()
-
-    def set_draft_status(self, draft_id: int, status: str) -> None:
-        self.conn.execute("UPDATE drafts SET status = ? WHERE id = ?", (status, draft_id))
-        self.conn.commit()
-
-    def get_draft(self, draft_id: int) -> Optional[Draft]:
+    def get_lobby(self, lobby_id: int) -> Optional[Lobby]:
         row = self.conn.execute(
-            "SELECT id, event_id, channel_id, message_id, captain_a, captain_b, status, "
-            "team_a_role, team_b_role, team_a_voice, team_b_voice FROM drafts WHERE id = ?", (draft_id,)
+            "SELECT id, guild_id, channel_id, creator_id, event_id, queue_message_id, draft_message_id, "
+            "status, captain_a, captain_b, winner, reported_by, "
+            "team_a_role, team_b_role, team_a_voice, team_b_voice FROM lobbies WHERE id = ?", (lobby_id,)
         ).fetchone()
-        return Draft(**dict(row)) if row else None
+        return Lobby(**dict(row)) if row else None
 
-    def set_draft_teams(self, draft_id: int, team_a_role: Optional[int], team_b_role: Optional[int],
-                        team_a_voice: Optional[int], team_b_voice: Optional[int]) -> None:
-        self.conn.execute(
-            "UPDATE drafts SET team_a_role = ?, team_b_role = ?, team_a_voice = ?, team_b_voice = ? "
-            "WHERE id = ?",
-            (team_a_role, team_b_role, team_a_voice, team_b_voice, draft_id),
-        )
+    def update_lobby(self, lobby_id: int, **fields) -> None:
+        """Sets the given lobby columns, e.g. update_lobby(1, status="playing", winner=None)."""
+        columns = ", ".join(f"{name} = ?" for name in fields)
+        self.conn.execute(f"UPDATE lobbies SET {columns} WHERE id = ?", (*fields.values(), lobby_id))
         self.conn.commit()
 
-    def latest_finished_draft(self, event_id: int) -> Optional[Draft]:
+    def set_lobby_teams(self, lobby_id: int, team_a_role: Optional[int], team_b_role: Optional[int],
+                        team_a_voice: Optional[int], team_b_voice: Optional[int]) -> None:
+        self.update_lobby(lobby_id, team_a_role=team_a_role, team_b_role=team_b_role,
+                          team_a_voice=team_a_voice, team_b_voice=team_b_voice)
+
+    def latest_lobby_with_teams(self, event_id: int) -> Optional[Lobby]:
         row = self.conn.execute(
-            "SELECT id FROM drafts WHERE event_id = ? AND status = 'done' ORDER BY id DESC LIMIT 1",
+            "SELECT id FROM lobbies WHERE event_id = ? AND team_a_voice IS NOT NULL ORDER BY id DESC LIMIT 1",
             (event_id,),
         ).fetchone()
-        return self.get_draft(row["id"]) if row else None
+        return self.get_lobby(row["id"]) if row else None
 
-    def drafts_with_teams(self, event_id: int) -> List[Draft]:
+    def lobbies_with_teams(self, event_id: int) -> List[Lobby]:
         rows = self.conn.execute(
-            "SELECT id FROM drafts WHERE event_id = ? AND (team_a_role IS NOT NULL OR team_b_role IS NOT NULL "
+            "SELECT id FROM lobbies WHERE event_id = ? AND (team_a_role IS NOT NULL OR team_b_role IS NOT NULL "
             "OR team_a_voice IS NOT NULL OR team_b_voice IS NOT NULL)", (event_id,)
         ).fetchall()
-        return [self.get_draft(r["id"]) for r in rows]
+        return [self.get_lobby(r["id"]) for r in rows]
+
+    def add_lobby_player(self, lobby_id: int, user_id: int, name: str) -> bool:
+        """Returns False if the user was already in the lobby."""
+        cur = self.conn.execute(
+            "INSERT OR IGNORE INTO lobby_players (lobby_id, user_id, name) VALUES (?, ?, ?)",
+            (lobby_id, user_id, name),
+        )
+        self.conn.commit()
+        return cur.rowcount > 0
+
+    def remove_lobby_player(self, lobby_id: int, user_id: int) -> bool:
+        """Returns False if the user wasn't in the lobby."""
+        cur = self.conn.execute(
+            "DELETE FROM lobby_players WHERE lobby_id = ? AND user_id = ?", (lobby_id, user_id)
+        )
+        self.conn.commit()
+        return cur.rowcount > 0
+
+    def lobby_players(self, lobby_id: int) -> List[LobbyPlayer]:
+        rows = self.conn.execute(
+            "SELECT user_id, name, team, pick_no FROM lobby_players WHERE lobby_id = ? ORDER BY rowid",
+            (lobby_id,),
+        ).fetchall()
+        return [LobbyPlayer(r["user_id"], r["name"], r["team"], r["pick_no"]) for r in rows]
+
+    def assign_pick(self, lobby_id: int, user_id: int, team: str, pick_no: int) -> None:
+        self.conn.execute(
+            "UPDATE lobby_players SET team = ?, pick_no = ? WHERE lobby_id = ? AND user_id = ?",
+            (team, pick_no, lobby_id, user_id),
+        )
+        self.conn.commit()
+
+    # --- wins and losses ----------------------------------------------------
+
+    def record_result(self, guild_id: int, winners: List[int], losers: List[int]) -> None:
+        for user_ids, column in ((winners, "wins"), (losers, "losses")):
+            for user_id in user_ids:
+                self.conn.execute(
+                    f"INSERT INTO player_stats (guild_id, user_id, {column}) VALUES (?, ?, 1) "
+                    f"ON CONFLICT (guild_id, user_id) DO UPDATE SET {column} = {column} + 1",
+                    (guild_id, user_id),
+                )
+        self.conn.commit()
+
+    def player_stats(self, guild_id: int, user_id: int) -> tuple:
+        """(wins, losses) of the user in this server."""
+        row = self.conn.execute(
+            "SELECT wins, losses FROM player_stats WHERE guild_id = ? AND user_id = ?", (guild_id, user_id)
+        ).fetchone()
+        return (row["wins"], row["losses"]) if row else (0, 0)
+
+    def stats_leaderboard(self, guild_id: int, limit: int, offset: int = 0) -> List[tuple]:
+        """(user_id, wins, losses) for everyone who played, most wins first (fewest losses on a tie)."""
+        rows = self.conn.execute(
+            "SELECT user_id, wins, losses FROM player_stats WHERE guild_id = ? AND wins + losses > 0 "
+            "ORDER BY wins DESC, losses, user_id LIMIT ? OFFSET ?",
+            (guild_id, limit, offset),
+        ).fetchall()
+        return [(r["user_id"], r["wins"], r["losses"]) for r in rows]
+
+    def stats_player_count(self, guild_id: int) -> int:
+        row = self.conn.execute(
+            "SELECT COUNT(*) AS n FROM player_stats WHERE guild_id = ? AND wins + losses > 0", (guild_id,)
+        ).fetchone()
+        return row["n"]
 
     # --- bonks --------------------------------------------------------------
 
@@ -439,26 +510,6 @@ class Database:
             "SELECT COUNT(*) AS n FROM bonks WHERE guild_id = ? AND count > 0", (guild_id,)
         ).fetchone()
         return row["n"]
-
-    def active_draft(self, event_id: int) -> Optional[Draft]:
-        row = self.conn.execute(
-            "SELECT id FROM drafts WHERE event_id = ? AND status = 'active'", (event_id,)
-        ).fetchone()
-        return self.get_draft(row["id"]) if row else None
-
-    def draft_players(self, draft_id: int) -> List[DraftPlayer]:
-        rows = self.conn.execute(
-            "SELECT user_id, name, team, pick_no FROM draft_players WHERE draft_id = ? ORDER BY rowid",
-            (draft_id,),
-        ).fetchall()
-        return [DraftPlayer(r["user_id"], r["name"], r["team"], r["pick_no"]) for r in rows]
-
-    def assign_pick(self, draft_id: int, user_id: int, team: str, pick_no: int) -> None:
-        self.conn.execute(
-            "UPDATE draft_players SET team = ?, pick_no = ? WHERE draft_id = ? AND user_id = ?",
-            (team, pick_no, draft_id, user_id),
-        )
-        self.conn.commit()
 
     # --- participants -------------------------------------------------------
 

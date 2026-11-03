@@ -17,12 +17,14 @@ over, the channel and role are deleted.
 | `/event close` | Inside the event channel | Organizer / admins |
 | `/event reopen` | Inside the event channel | Organizer / admins |
 | `/event poll` | Inside the event channel | Organizer / admins |
-| `/event captains captain1 captain2` | Inside the event channel | Organizer / admins |
 | `/event move` | Inside the event channel | Organizer / admins |
 | `/event regroup` | Inside the event channel | Organizer / admins |
 | `/event end` | Inside the event channel | Organizer / admins |
 | `/event cancel` | Inside the event channel | Organizer / admins |
 | `/event list` | Anywhere | Everyone |
+| `/captains` | Anywhere | Everyone |
+| `/stats [member]` | Anywhere | Everyone |
+| `/leaderboard` | Anywhere | Everyone |
 
 Times can be written as `20:00`, `tomorrow 20:00`, `10-10 20:00` or `10-10-2026 20:00`
 (interpreted in the `TIMEZONE` from `.env`). Discord shows them to each member in their own timezone.
@@ -47,13 +49,20 @@ automatically at the start time. `/event reopen` opens them again.
 in the event channel. Everyone in the channel can vote and change their vote; the results update
 live. This works whether sign-ups are open or closed.
 
-**Captains draft:** `/event captains captain1 captain2` lets two captains pick teams in snake order
-(X O O X X O O X …; captain1 picks first). Only works when sign-ups are closed, the event has at
-least 4 players and an even number of players, and both captains are in the event. Only the captain
-whose turn it is can pick; the last player is assigned automatically. Running it again replaces
-the current draft.
+**Captains games:** `/captains` posts a queue with **Join** / **Leave** buttons (the person who ran
+it is the host and is in the queue already). When there is an even number of players (at least 4),
+the host clicks **Start**. A new message appears where players click **Be captain** (or **Step down**);
+when there are 2 captains, a captain clicks **Lock in**. A coin flip decides who picks first, then the
+captains pick players in snake order (X O O X X O O X …). Only the captain whose turn it is can pick;
+the last player is assigned automatically. The host or an admin can **Cancel** before the draft starts.
 
-**Team voice channels:** when a draft completes, each team gets a role and a private voice channel
+After the game, the winning captain clicks **Report win**. The other captain must click **Approve**
+(or **Deny**, then the game goes on and the real winner can report again). Admins can also approve.
+After approval, every player of the winning team gets a win and every player of the losing team a loss.
+`/stats [member]` shows one player's wins and losses, `/leaderboard` shows everyone who ever played
+(most wins first, 10 per page).
+
+**Team voice channels:** when a `/captains` draft in an event channel completes, each team gets a role and a private voice channel
 (🔴 / 🔵). Players who are in voice are moved automatically. `/event move` moves everyone to their
 team channel again, `/event regroup` pulls all players into the voice channel you're in. Team
 channels and roles are deleted when the event ends or a new draft starts.

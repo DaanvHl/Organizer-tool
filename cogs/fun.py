@@ -3,7 +3,7 @@ import random
 import re
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 import discord
 from discord import app_commands
@@ -143,7 +143,7 @@ SOUND_KEYWORDS = [(re.compile(p, re.IGNORECASE), SOUNDS_DIR / name) for p, name 
 ]]
 
 
-BONKBOARD_PAGE_SIZE = 10
+LEADERBOARD_PAGE_SIZE = 10
 MEDALS = ["🥇", "🥈", "🥉"]
 
 
@@ -152,21 +152,31 @@ def build_bonkboard_embed(rows: list, offset: int, page: int, pages: int) -> dis
     Plain names instead of mentions, so nobody gets pinged or highlighted."""
     lines = []
     for rank, (name, count) in enumerate(rows, start=offset + 1):
-        place = MEDALS[rank - 1] if rank <= len(MEDALS) else f"**{rank}.**"
-        lines.append(f"{place} {discord.utils.escape_markdown(name)} · **{count}** bonk{'' if count == 1 else 's'}")
+        lines.append(f"{rank_label(rank)} {discord.utils.escape_markdown(name)} · "
+                     f"**{count}** bonk{'' if count == 1 else 's'}")
     embed = discord.Embed(title="🔨 Bonk leaderboard", description="\n".join(lines),
                           color=discord.Color.orange())
     embed.set_footer(text=f"Page {page + 1} of {pages}")
     return embed
 
 
-class BonkboardView(discord.ui.View):
-    """Previous/Next buttons for the bonk leaderboard. Reads the database again on every page."""
+def rank_label(rank: int) -> str:
+    return MEDALS[rank - 1] if rank <= len(MEDALS) else f"**{rank}.**"
 
-    def __init__(self, db: Database, guild: discord.Guild):
+
+class LeaderboardView(discord.ui.View):
+    """Previous/Next buttons for a leaderboard. Reads the database again on every page.
+
+    count() gives the number of rows, fetch(limit, offset) gives (user_id, *values) rows and
+    build(rows, offset, page, pages) turns rows with the user_id swapped for a name into an embed."""
+
+    def __init__(self, guild: discord.Guild, count: Callable[[], int],
+                 fetch: Callable[[int, int], list], build: Callable[[list, int, int, int], discord.Embed]):
         super().__init__(timeout=300)
-        self.db = db
         self.guild = guild
+        self.count = count
+        self.fetch = fetch
+        self.build = build
         self.page = 0
         self.pages = 1
         self.names = {}  # user_id -> display name, so each member is only looked up once
@@ -184,15 +194,24 @@ class BonkboardView(discord.ui.View):
         return self.names[user_id]
 
     async def render(self) -> discord.Embed:
-        total = self.db.bonked_user_count(self.guild.id)
-        self.pages = max(1, -(-total // BONKBOARD_PAGE_SIZE))
+        self.pages = max(1, -(-self.count() // LEADERBOARD_PAGE_SIZE))
         self.page = max(0, min(self.page, self.pages - 1))
-        offset = self.page * BONKBOARD_PAGE_SIZE
-        rows = [(await self.name_of(user_id), count)
-                for user_id, count in self.db.bonk_leaderboard(self.guild.id, BONKBOARD_PAGE_SIZE, offset)]
+        offset = self.page * LEADERBOARD_PAGE_SIZE
+        rows = [(await self.name_of(user_id), *values)
+                for user_id, *values in self.fetch(LEADERBOARD_PAGE_SIZE, offset)]
         self.previous.disabled = self.page == 0
         self.next.disabled = self.page >= self.pages - 1
-        return build_bonkboard_embed(rows, offset, self.page, self.pages)
+        return self.build(rows, offset, self.page, self.pages)
+
+    async def send(self, interaction: discord.Interaction) -> None:
+        """Sends the first page as a follow-up; the interaction must be deferred already."""
+        embed = await self.render()
+        no_pings = discord.AllowedMentions.none()
+        if self.pages == 1:
+            await interaction.followup.send(embed=embed, allowed_mentions=no_pings)
+            return
+        self.message = await interaction.followup.send(embed=embed, view=self, allowed_mentions=no_pings,
+                                                       wait=True)
 
     async def change_page(self, interaction: discord.Interaction, step: int):
         self.page += step
@@ -280,14 +299,11 @@ class Fun(commands.Cog):
                 "Nobody got bonked yet. Use `/bonk` to be the first! 🔨", ephemeral=True)
             return
         await interaction.response.defer()  # looking up names can take a moment
-        view = BonkboardView(self.db, interaction.guild)
-        embed = await view.render()
-        no_pings = discord.AllowedMentions.none()
-        if view.pages == 1:
-            await interaction.followup.send(embed=embed, allowed_mentions=no_pings)
-            return
-        view.message = await interaction.followup.send(embed=embed, view=view, allowed_mentions=no_pings,
-                                                       wait=True)
+        guild_id = interaction.guild_id
+        view = LeaderboardView(interaction.guild, lambda: self.db.bonked_user_count(guild_id),
+                               lambda limit, offset: self.db.bonk_leaderboard(guild_id, limit, offset),
+                               build_bonkboard_embed)
+        await view.send(interaction)
 
     @app_commands.command(name="coinflip", description="Flip a coin")
     async def coinflip(self, interaction: discord.Interaction):

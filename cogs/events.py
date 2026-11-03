@@ -1,5 +1,4 @@
 import logging
-import random
 import re
 import time
 from datetime import datetime
@@ -10,7 +9,7 @@ from discord import app_commands
 from discord.ext import commands, tasks
 
 import config
-from database import Database, Draft, DraftPlayer, Event, Participant, Poll
+from database import Database, Event, Lobby, LobbyPlayer, Participant, Poll
 from timeparse import parse_time
 
 log = logging.getLogger(__name__)
@@ -23,17 +22,6 @@ STATUS_FOOTERS = {
 
 
 MAX_POLL_OPTIONS = 25  # Discord's limit for a select menu
-
-
-LAST_PICK_LINES = [
-    "Picked last, but we still love you 💔",
-    "Last one. Nobody wanted you, but you are here.",
-    "Someone has to be last. Today it is you.",
-    "Picked last, but maybe plays the best. Maybe.",
-    "Not picked. Just… added. 🫂",
-]
-
-MAX_DRAFT_POOL = 125  # 5 menus of 25 players; a message holds at most 5 rows
 
 
 def truncate_field(value: str, limit: int = 1024) -> str:
@@ -211,84 +199,6 @@ def build_channel_poll_embed(poll: Poll, votes: List[Participant]) -> discord.Em
     return embed
 
 
-def draft_turn(pick_index: int) -> str:
-    """Team that makes the given (0-based) pick in a snake draft: A B B A A B B A …"""
-    return "A" if pick_index % 2 == (pick_index // 2) % 2 else "B"
-
-
-class DraftSelect(discord.ui.DynamicItem[discord.ui.Select],
-                  template=r"draft:pick:(?P<id>\d+):(?P<chunk>\d+)"):
-    """Menu a captain uses to pick a player. Large pools are split over several menus of 25."""
-
-    def __init__(self, draft_id: int, chunk: int, players: List[tuple], placeholder: str):
-        select = discord.ui.Select(
-            custom_id=f"draft:pick:{draft_id}:{chunk}",
-            placeholder=placeholder,
-            options=[discord.SelectOption(label=name[:100], value=str(uid)) for uid, name in players],
-        )
-        super().__init__(select)
-        self.draft_id = draft_id
-
-    @classmethod
-    async def from_custom_id(cls, interaction: discord.Interaction, item: discord.ui.Select,
-                             match: re.Match[str], /):
-        players = [(int(o.value), o.label) for o in item.options]
-        return cls(int(match["id"]), int(match["chunk"]), players, item.placeholder or "")
-
-    async def callback(self, interaction: discord.Interaction):
-        cog: "Events" = interaction.client.get_cog("Events")
-        await cog.handle_draft_pick(interaction, self.draft_id, int(interaction.data["values"][0]))
-
-
-def build_draft_embed(draft: Draft, players: List[DraftPlayer]) -> discord.Embed:
-    names = {p.user_id: p.name for p in players}
-    available = [p for p in players if p.team is None]
-    picks_done = sum(1 for p in players if p.pick_no)
-    total_picks = len(players) - 2
-
-    def team_lines(team: str, captain_id: int) -> str:
-        picked = sorted((p for p in players if p.team == team and p.pick_no), key=lambda p: p.pick_no)
-        lines = [f"👑 <@{captain_id}>"] + [f"{i}. <@{p.user_id}>" for i, p in enumerate(picked, start=1)]
-        return truncate_field("\n".join(lines))
-
-    embed = discord.Embed(title="⚔️ Captains draft", color=discord.Color.red())
-    embed.add_field(name=f"Team {names.get(draft.captain_a, 'A')}"[:256],
-                    value=team_lines("A", draft.captain_a), inline=True)
-    embed.add_field(name=f"Team {names.get(draft.captain_b, 'B')}"[:256],
-                    value=team_lines("B", draft.captain_b), inline=True)
-    if available:
-        embed.add_field(name=f"Available ({len(available)})",
-                        value=truncate_field(", ".join(f"<@{p.user_id}>" for p in available)),
-                        inline=False)
-
-    if draft.status == "replaced":
-        embed.color = discord.Color.dark_grey()
-        embed.description = "This draft was replaced by a new one."
-    elif draft.status == "done" or not available:
-        embed.color = discord.Color.green()
-        embed.description = "✅ Draft complete!"
-    else:
-        team = draft_turn(picks_done)
-        captain = draft.captain_a if team == "A" else draft.captain_b
-        embed.description = f"Now picking: <@{captain}> (pick {picks_done + 1} of {total_picks})"
-        embed.set_footer(text="Snake order: X O O X X O O X … · Only the captain whose turn it is can pick.")
-    return embed
-
-
-def build_draft_view(draft: Draft, players: List[DraftPlayer]) -> Optional[discord.ui.View]:
-    available = [(p.user_id, p.name) for p in players if p.team is None]
-    if draft.status != "active" or not available:
-        return None
-    view = discord.ui.View(timeout=None)
-    chunks = [available[i:i + 25] for i in range(0, len(available), 25)]
-    for index, chunk in enumerate(chunks):
-        placeholder = "Pick a player…"
-        if len(chunks) > 1:
-            placeholder = f"Pick a player ({index * 25 + 1}–{index * 25 + len(chunk)})…"
-        view.add_item(DraftSelect(draft.id, index, chunk, placeholder))
-    return view
-
-
 def event_view(event_id: int, signups_open: bool = True) -> discord.ui.View:
     view = discord.ui.View(timeout=None)
     if signups_open:
@@ -357,8 +267,8 @@ class Events(commands.GroupCog, group_name="event", group_description="Create an
         guild = self.bot.get_guild(event.guild_id)
         if guild is None:
             return
-        for draft in self.db.drafts_with_teams(event.id):
-            await self.delete_team_channels(guild, draft)
+        for lobby in self.db.lobbies_with_teams(event.id):
+            await self.delete_team_channels(guild, lobby)
         reason = f"Event '{event.name}' {status}"
         channel = guild.get_channel(event.channel_id) if event.channel_id else None
         if channel is not None:
@@ -494,76 +404,16 @@ class Events(commands.GroupCog, group_name="event", group_description="Create an
         await interaction.response.edit_message(embed=build_channel_poll_embed(poll, self.db.votes(poll.id)))
         await interaction.followup.send(f"You voted **{poll.options[choice]}**.", ephemeral=True)
 
-    async def handle_draft_pick(self, interaction: discord.Interaction, draft_id: int, user_id: int):
-        draft = self.db.get_draft(draft_id)
-        event = self.db.get_event(draft.event_id) if draft else None
-        if draft is None or draft.status != "active" or event is None or not event.active:
-            await interaction.response.send_message("This draft is over.", ephemeral=True)
-            return
-
-        # No awaits between reading the turn and saving the pick, so two quick clicks can't both count.
-        players = self.db.draft_players(draft.id)
-        picks_done = sum(1 for p in players if p.pick_no)
-        team = draft_turn(picks_done)
-        captain = draft.captain_a if team == "A" else draft.captain_b
-        if interaction.user.id != captain:
-            if interaction.user.id in (draft.captain_a, draft.captain_b):
-                text = f"It's not your turn. Waiting for <@{captain}> to pick."
-            else:
-                text = f"Only the captains can pick. It's <@{captain}>'s turn."
-            await interaction.response.send_message(text, ephemeral=True)
-            return
-        target = next((p for p in players if p.user_id == user_id), None)
-        if target is None or target.team is not None:
-            await interaction.response.send_message("That player was already picked.", ephemeral=True)
-            return
-
-        self.db.assign_pick(draft.id, user_id, team, picks_done + 1)
-        log_lines = [f"<@{captain}> picked <@{user_id}>."]
-        remaining = [p for p in players if p.team is None and p.user_id != user_id]
-        if len(remaining) == 1:
-            last, last_team = remaining[0], draft_turn(picks_done + 1)
-            self.db.assign_pick(draft.id, last.user_id, last_team, picks_done + 2)
-            last_captain = draft.captain_a if last_team == "A" else draft.captain_b
-            log_lines.append(f"<@{last.user_id}> is the last player and joins <@{last_captain}>'s team.")
-            remaining = []
-        if not remaining:
-            self.db.set_draft_status(draft.id, "done")
-
-        draft = self.db.get_draft(draft.id)
-        players = self.db.draft_players(draft.id)
-        await interaction.response.edit_message(
-            content=None, embed=build_draft_embed(draft, players), view=build_draft_view(draft, players))
-
-        if remaining:
-            next_team = draft_turn(picks_done + 1)
-            next_captain = draft.captain_a if next_team == "A" else draft.captain_b
-            log_lines.append(f"<@{next_captain}>, your turn to pick!")
-            mentions = discord.AllowedMentions(users=[discord.Object(next_captain)])
-        else:
-            for team_key, team_captain in (("A", draft.captain_a), ("B", draft.captain_b)):
-                members = [f"<@{p.user_id}>" for p in sorted(players, key=lambda p: p.pick_no)
-                           if p.team == team_key]
-                log_lines.append(f"**Team <@{team_captain}>**: " + ", ".join(members))
-            log_lines.insert(0, "✅ **Draft complete!**")
-            if len(players) > 2:
-                log_lines.append(f"*{random.choice(LAST_PICK_LINES)}*")
-            mentions = discord.AllowedMentions.none()
-        await interaction.channel.send("\n".join(log_lines), allowed_mentions=mentions)
-
-        if not remaining:
-            await self.create_team_channels(interaction.guild, interaction.channel, event, draft, players)
-
     # --- team voice channels ---------------------------------------------------
 
     async def create_team_channels(self, guild: discord.Guild, channel: discord.abc.Messageable,
-                                   event: Event, draft: Draft, players: List[DraftPlayer]) -> None:
+                                   event: Event, lobby: Lobby, players: List[LobbyPlayer]) -> None:
         """Creates a role and private voice channel per team, then moves players who are in voice."""
         names = {p.user_id: p.name for p in players}
         created = {}
         try:
             category = await self.get_category(guild)
-            for team, captain, emoji in (("A", draft.captain_a, "🔴"), ("B", draft.captain_b, "🔵")):
+            for team, captain, emoji in (("A", lobby.captain_a, "🔴"), ("B", lobby.captain_b, "🔵")):
                 team_name = f"Team {names.get(captain, team)}"
                 role = await guild.create_role(name=f"{team_name} ({event.name})"[:100],
                                                reason=f"Draft teams for event '{event.name}'")
@@ -578,12 +428,12 @@ class Events(commands.GroupCog, group_name="event", group_description="Create an
                     reason=f"Draft teams for event '{event.name}'")
                 created[f"{team}_voice"] = voice
         except discord.HTTPException as e:
-            log.warning("Could not create team channels for draft %s: %s", draft.id, e)
+            log.warning("Could not create team channels for lobby %s: %s", lobby.id, e)
             await channel.send("⚠️ I couldn't create the team voice channels. "
                                "I need **Manage Roles** and **Manage Channels**.")
         finally:
             ids = {key: obj.id for key, obj in created.items()}
-            self.db.set_draft_teams(draft.id, ids.get("A_role"), ids.get("B_role"),
+            self.db.set_lobby_teams(lobby.id, ids.get("A_role"), ids.get("B_role"),
                                     ids.get("A_voice"), ids.get("B_voice"))
         if len(created) < 4:
             return
@@ -597,9 +447,9 @@ class Events(commands.GroupCog, group_name="event", group_description="Create an
                 except discord.HTTPException as e:
                     log.warning("Could not give team role to %s: %s", p.user_id, e)
 
-        draft = self.db.get_draft(draft.id)
-        moved, not_in_voice, failed = await self.move_to_team_channels(guild, draft, players)
-        lines = [f"🔊 Team voice channels are ready: <#{draft.team_a_voice}> and <#{draft.team_b_voice}>."]
+        lobby = self.db.get_lobby(lobby.id)
+        moved, not_in_voice, failed = await self.move_to_team_channels(guild, lobby, players)
+        lines = [f"🔊 Team voice channels are ready: <#{lobby.team_a_voice}> and <#{lobby.team_b_voice}>."]
         if moved:
             lines.append(f"Moved **{moved}** player(s) to their team channel.")
         if not_in_voice:
@@ -618,11 +468,11 @@ class Events(commands.GroupCog, group_name="event", group_description="Create an
                 return None
         return member
 
-    async def move_to_team_channels(self, guild: discord.Guild, draft: Draft,
-                                    players: List[DraftPlayer]) -> tuple:
+    async def move_to_team_channels(self, guild: discord.Guild, lobby: Lobby,
+                                    players: List[LobbyPlayer]) -> tuple:
         """Moves every team member who is in a voice channel. Returns (moved, not_in_voice ids, failed)."""
         moved, not_in_voice, failed = 0, [], 0
-        voices = {"A": guild.get_channel(draft.team_a_voice), "B": guild.get_channel(draft.team_b_voice)}
+        voices = {"A": guild.get_channel(lobby.team_a_voice), "B": guild.get_channel(lobby.team_b_voice)}
         for p in players:
             target = voices.get(p.team)
             member = await self.get_member(guild, p.user_id)
@@ -641,30 +491,22 @@ class Events(commands.GroupCog, group_name="event", group_description="Create an
                 failed += 1
         return moved, not_in_voice, failed
 
-    async def delete_team_channels(self, guild: discord.Guild, draft: Draft) -> None:
-        for channel_id in (draft.team_a_voice, draft.team_b_voice):
+    async def delete_team_channels(self, guild: discord.Guild, lobby: Lobby) -> None:
+        for channel_id in (lobby.team_a_voice, lobby.team_b_voice):
             channel = guild.get_channel(channel_id) if channel_id else None
             if channel is not None:
                 try:
                     await channel.delete(reason="Draft teams removed")
                 except discord.HTTPException as e:
                     log.warning("Could not delete team channel %s: %s", channel_id, e)
-        for role_id in (draft.team_a_role, draft.team_b_role):
+        for role_id in (lobby.team_a_role, lobby.team_b_role):
             role = guild.get_role(role_id) if role_id else None
             if role is not None:
                 try:
                     await role.delete(reason="Draft teams removed")
                 except discord.HTTPException as e:
                     log.warning("Could not delete team role %s: %s", role_id, e)
-        self.db.set_draft_teams(draft.id, None, None, None, None)
-
-    async def member_names(self, guild: discord.Guild, user_ids: List[int]) -> List[tuple]:
-        """(user_id, display name) for each user, fetching members that aren't cached."""
-        result = []
-        for user_id in user_ids:
-            member = await self.get_member(guild, user_id)
-            result.append((user_id, member.display_name if member else f"User {user_id}"))
-        return result
+        self.db.set_lobby_teams(lobby.id, None, None, None, None)
 
     # --- commands -----------------------------------------------------------
 
@@ -762,11 +604,11 @@ class Events(commands.GroupCog, group_name="event", group_description="Create an
             "• `/event close` to stop new sign-ups (happens automatically at the start time)\n"
             "• `/event reopen` to allow sign-ups again\n"
             "• `/event poll` to start a poll in this channel\n"
-            "• `/event captains` to let two captains draft teams (after sign-ups are closed)\n"
             "• `/event move` to move drafted players to their team voice channel\n"
             "• `/event regroup` to pull everyone into your voice channel\n"
             "• `/event end` to close the event and delete this channel\n"
-            "• `/event cancel` to cancel the event",
+            "• `/event cancel` to cancel the event\n\n"
+            "**For everyone:** `/captains` starts a queue. Two captains pick the teams.",
             allowed_mentions=discord.AllowedMentions.none())
         await interaction.followup.send(f"Event created! Channel: {channel.mention}", ephemeral=True)
 
@@ -918,81 +760,21 @@ class Events(commands.GroupCog, group_name="event", group_description="Create an
 
         await interaction.response.send_modal(PollModal(post_poll))
 
-    @app_commands.command(name="captains", description="Start a snake draft where two captains pick their teams")
-    @app_commands.describe(captain1="Captain who picks first", captain2="Captain who picks second")
-    async def captains(self, interaction: discord.Interaction,
-                       captain1: discord.Member, captain2: discord.Member):
-        event = await self.event_for_organizer(interaction)
-        if event is None:
-            return
-
-        async def refuse(text: str):
-            await interaction.response.send_message(text, ephemeral=True)
-
-        participant_ids = [p.user_id for p in self.db.participants(event.id)]
-        count = len(participant_ids)
-        if not event.signups_closed:
-            return await refuse(
-                "🔒 Sign-ups are still open. Close them first with `/event close`, "
-                "so nobody can join while the teams are being picked.")
-        if count <= 3:
-            return await refuse(
-                f"A draft needs at least **4 players** (2 captains + 2 to pick). "
-                f"This event has only **{count}**.")
-        if count % 2:
-            return await refuse(
-                f"This event has **{count} players**, so the teams would be uneven. "
-                "Make it an even number first: remove someone with `/event kick`, "
-                "or use `/event reopen` to let one more player join.")
-        if count - 2 > MAX_DRAFT_POOL:
-            return await refuse(f"A draft can have at most {MAX_DRAFT_POOL + 2} players.")
-        if captain1.id == captain2.id:
-            return await refuse("Pick two different captains.")
-        not_in_event = [c.mention for c in (captain1, captain2) if c.id not in participant_ids]
-        if not_in_event:
-            return await refuse(f"{' and '.join(not_in_event)} isn't in this event. "
-                                "Captains must be players of the event.")
-
-        await interaction.response.defer()
-        previous = self.db.active_draft(event.id)
-        if previous is not None:
-            self.db.set_draft_status(previous.id, "replaced")
-            if previous.message_id:
-                previous = self.db.get_draft(previous.id)
-                try:
-                    await interaction.channel.get_partial_message(previous.message_id).edit(
-                        content=None, embed=build_draft_embed(previous, self.db.draft_players(previous.id)),
-                        view=None)
-                except discord.HTTPException as e:
-                    log.warning("Could not update replaced draft %s: %s", previous.id, e)
-        for old in self.db.drafts_with_teams(event.id):
-            await self.delete_team_channels(interaction.guild, old)
-
-        players = await self.member_names(interaction.guild, participant_ids)
-        draft_id = self.db.create_draft(event.id, interaction.channel_id, captain1.id, captain2.id, players)
-        draft = self.db.get_draft(draft_id)
-        draft_players = self.db.draft_players(draft_id)
-        message = await interaction.followup.send(
-            f"⚔️ Draft started! {captain1.mention} vs {captain2.mention}. "
-            f"{captain1.mention}, you pick first.",
-            embed=build_draft_embed(draft, draft_players), view=build_draft_view(draft, draft_players),
-            allowed_mentions=discord.AllowedMentions(users=[captain1, captain2]), wait=True)
-        self.db.set_draft_message(draft_id, message.id)
-
     @app_commands.command(name="move", description="Move all drafted players who are in voice to their team channel")
     async def move(self, interaction: discord.Interaction):
         event = await self.event_for_organizer(interaction)
         if event is None:
             return
-        draft = self.db.latest_finished_draft(event.id)
-        if draft is None or not draft.team_a_voice:
+        lobby = self.db.latest_lobby_with_teams(event.id)
+        if lobby is None:
             await interaction.response.send_message(
-                "There are no team channels yet. Finish a draft with `/event captains` first.", ephemeral=True)
+                "There are no team channels yet. Finish a draft with `/captains` in this channel first.",
+                ephemeral=True)
             return
         await interaction.response.defer()
         moved, not_in_voice, failed = await self.move_to_team_channels(
-            interaction.guild, draft, self.db.draft_players(draft.id))
-        lines = [f"🔊 Moved **{moved}** player(s) to <#{draft.team_a_voice}> and <#{draft.team_b_voice}>."]
+            interaction.guild, lobby, self.db.lobby_players(lobby.id))
+        lines = [f"🔊 Moved **{moved}** player(s) to <#{lobby.team_a_voice}> and <#{lobby.team_b_voice}>."]
         if not_in_voice:
             lines.append("Not in voice: " + ", ".join(f"<@{uid}>" for uid in not_in_voice))
         if failed:
