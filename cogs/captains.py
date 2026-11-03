@@ -18,14 +18,6 @@ log = logging.getLogger(__name__)
 MIN_PLAYERS = 4  # 2 captains + 2 to pick
 MAX_PLAYERS = 127  # 2 captains + 5 menus of 25 players; a message holds at most 5 rows
 
-LAST_PICK_LINES = [
-    "Picked last, but we still love you 💔",
-    "Last one. Nobody wanted you, but you are here.",
-    "Someone has to be last. Today it is you.",
-    "Picked last, but maybe plays the best. Maybe.",
-    "Not picked. Just… added. 🫂",
-]
-
 TEAM_EMOJI = {"A": "🔴", "B": "🔵"}
 
 BUTTONS = {
@@ -193,8 +185,7 @@ def build_game_embed(lobby: Lobby, players: List[LobbyPlayer]) -> discord.Embed:
         embed.set_footer(text="Snake order: X O O X X O O X … · Only the captain whose turn it is can pick.")
     elif lobby.status == "playing":
         embed.color = discord.Color.green()
-        embed.description = ("✅ Draft complete! Good luck! 🍀\n"
-                             "After the game, the winning captain clicks **Report win**.")
+        embed.description = "✅ Draft complete! After the game, the winning captain clicks **Report win**."
     elif lobby.status == "reported":
         embed.color = discord.Color.gold()
         loser = lobby.captain_of(other_team(lobby.winner))
@@ -202,8 +193,8 @@ def build_game_embed(lobby: Lobby, players: List[LobbyPlayer]) -> discord.Embed:
                              f"won.\n<@{loser}>, is this true? Click **Approve** or **Deny**.")
     elif lobby.status == "done":
         embed.color = discord.Color.gold()
-        embed.description = f"🏆 **{team_name(lobby, players, lobby.winner)}** won! GG 🫡"
-        embed.set_footer(text="Wins and losses are saved. See /leaderboard")
+        embed.description = f"🏆 **{team_name(lobby, players, lobby.winner)}** won!"
+        embed.set_footer(text="Winners got +1 win, losers +1 loss. See /leaderboard")
     else:
         embed.color = discord.Color.dark_grey()
         embed.description = "This game was cancelled."
@@ -284,7 +275,7 @@ class Captains(commands.Cog):
         if lobby.status != "queue":
             return await self.refuse(interaction, "This queue is closed. The game already started.")
         if any(p.user_id == interaction.user.id for p in players):
-            return await self.refuse(interaction, "You are already in the queue. 👍")
+            return await self.refuse(interaction, "You are already in the queue.")
         if len(players) >= MAX_PLAYERS:
             return await self.refuse(interaction, f"The queue is full ({MAX_PLAYERS} players).")
         self.db.add_lobby_player(lobby.id, interaction.user.id, interaction.user.display_name)
@@ -312,13 +303,8 @@ class Captains(commands.Cog):
         self.db.update_lobby(lobby.id, status="captains")
         await self.show_queue(interaction, lobby)
         lobby = self.db.get_lobby(lobby.id)
-        pings = " ".join(f"<@{p.user_id}>" for p in players)
-        if len(pings) > 1800:
-            pings = ""
         message = await interaction.followup.send(
-            f"⚔️ The game starts! {pings}\nWho wants to be captain?",
-            embed=build_game_embed(lobby, players), view=build_game_view(lobby, players),
-            allowed_mentions=discord.AllowedMentions(users=True), wait=True)
+            embed=build_game_embed(lobby, players), view=build_game_view(lobby, players), wait=True)
         self.db.update_lobby(lobby.id, draft_message_id=message.id)
 
     async def on_cancel(self, interaction: discord.Interaction, lobby: Lobby, players: List[LobbyPlayer]):
@@ -346,7 +332,7 @@ class Captains(commands.Cog):
         if not any(p.user_id == interaction.user.id for p in players):
             return await self.refuse(interaction, "Only players in this game can be captain.")
         if interaction.user.id in (lobby.captain_a, lobby.captain_b):
-            return await self.refuse(interaction, "You are already a captain. 👑")
+            return await self.refuse(interaction, "You are already a captain.")
         if lobby.captain_a is None:
             self.db.update_lobby(lobby.id, captain_a=interaction.user.id)
         elif lobby.captain_b is None:
@@ -379,9 +365,6 @@ class Captains(commands.Cog):
         self.db.assign_pick(lobby.id, first, "A", 0)
         self.db.assign_pick(lobby.id, second, "B", 0)
         await self.show_game(interaction, lobby)
-        await interaction.followup.send(
-            f"🪙 Coin flip! <@{first}> picks first. <@{second}> picks second.\n<@{first}>, your turn to pick!",
-            allowed_mentions=discord.AllowedMentions(users=[discord.Object(first), discord.Object(second)]))
 
     async def handle_pick(self, interaction: discord.Interaction, lobby_id: int, user_id: int):
         lobby = self.db.get_lobby(lobby_id)
@@ -407,37 +390,18 @@ class Captains(commands.Cog):
             return
 
         self.db.assign_pick(lobby.id, user_id, team, picks_done + 1)
-        log_lines = [f"<@{captain}> picked <@{user_id}>."]
         remaining = [p for p in players if p.team is None and p.user_id != user_id]
         if len(remaining) == 1:
             last, last_team = remaining[0], draft_turn(picks_done + 1)
             self.db.assign_pick(lobby.id, last.user_id, last_team, picks_done + 2)
-            log_lines.append(f"<@{last.user_id}> is the last player and joins <@{lobby.captain_of(last_team)}>'s team.")
             remaining = []
         if not remaining:
             self.db.update_lobby(lobby.id, status="playing")
 
         await self.show_game(interaction, lobby)
-        lobby = self.db.get_lobby(lobby.id)
-        players = self.db.lobby_players(lobby.id)
-
-        if remaining:
-            next_captain = lobby.captain_of(draft_turn(picks_done + 1))
-            log_lines.append(f"<@{next_captain}>, your turn to pick!")
-            mentions = discord.AllowedMentions(users=[discord.Object(next_captain)])
-        else:
-            for team_key in ("A", "B"):
-                members = [f"<@{p.user_id}>" for p in team_members(players, team_key)]
-                log_lines.append(f"{TEAM_EMOJI[team_key]} **{team_name(lobby, players, team_key)}**: "
-                                 + ", ".join(members))
-            log_lines.insert(0, "✅ **Draft complete!**")
-            log_lines.append(f"*{random.choice(LAST_PICK_LINES)}*")
-            log_lines.append("After the game, the winning captain clicks **Report win** on the draft message.")
-            mentions = discord.AllowedMentions.none()
-        await interaction.channel.send("\n".join(log_lines), allowed_mentions=mentions)
-
         if not remaining:
-            await self.make_event_team_channels(interaction, lobby, players)
+            await self.make_event_team_channels(interaction, self.db.get_lobby(lobby.id),
+                                                self.db.lobby_players(lobby.id))
 
     async def make_event_team_channels(self, interaction: discord.Interaction, lobby: Lobby,
                                        players: List[LobbyPlayer]) -> None:
@@ -460,8 +424,7 @@ class Captains(commands.Cog):
         await self.show_game(interaction, lobby)
         other = lobby.captain_of(other_team(team))
         await interaction.followup.send(
-            f"🏆 <@{interaction.user.id}> says their team won.\n"
-            f"<@{other}>, please click **Approve** or **Deny** on the draft message.",
+            f"<@{other}>, please approve or deny the win on the message above.",
             allowed_mentions=discord.AllowedMentions(users=[discord.Object(other)]))
 
     async def on_approve(self, interaction: discord.Interaction, lobby: Lobby, players: List[LobbyPlayer]):
@@ -478,10 +441,6 @@ class Captains(commands.Cog):
         self.db.update_lobby(lobby.id, status="done")
         self.db.record_result(interaction.guild_id, winners, losers)
         await self.show_game(interaction, lobby)
-        await interaction.followup.send(
-            f"🏆 **{team_name(lobby, players, lobby.winner)}** won! GG 🫡\n"
-            f"Winners get +1 win, losers get +1 loss. See `/leaderboard`.",
-            allowed_mentions=discord.AllowedMentions.none())
 
     async def on_deny(self, interaction: discord.Interaction, lobby: Lobby, players: List[LobbyPlayer]):
         if lobby.status != "reported":
@@ -490,12 +449,6 @@ class Captains(commands.Cog):
             return await self.refuse(interaction, "Only the captains can deny.")
         self.db.update_lobby(lobby.id, status="playing", winner=None, reported_by=None)
         await self.show_game(interaction, lobby)
-        if interaction.user.id == lobby.reported_by:
-            text = f"↩️ <@{interaction.user.id}> took back the report. The game is still on."
-        else:
-            text = (f"❌ <@{interaction.user.id}> says no. The game is still on.\n"
-                    "The real winner can click **Report win** again.")
-        await interaction.followup.send(text, allowed_mentions=discord.AllowedMentions.none())
 
     # --- commands -----------------------------------------------------------
 

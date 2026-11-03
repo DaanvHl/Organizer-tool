@@ -457,7 +457,7 @@ class Events(commands.GroupCog, group_name="event", group_description="Create an
                          + ". Join your team channel, or ask the organizer to run `/event move`.")
         if failed:
             lines.append("⚠️ I couldn't move some players. I need the **Move Members** permission.")
-        await channel.send("\n".join(lines), allowed_mentions=discord.AllowedMentions(users=True))
+        await channel.send("\n".join(lines), allowed_mentions=discord.AllowedMentions.none())
 
     async def get_member(self, guild: discord.Guild, user_id: int) -> Optional[discord.Member]:
         member = guild.get_member(user_id)
