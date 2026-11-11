@@ -29,6 +29,8 @@ BUTTONS = {
     "claim": ("Be captain", "👑", discord.ButtonStyle.primary),
     "unclaim": ("Step down", "↩️", discord.ButtonStyle.secondary),
     "lock": ("Lock in", "🔒", discord.ButtonStyle.success),
+    "snake": ("Snake draft", "🐍", discord.ButtonStyle.primary),
+    "normal": ("Normal draft", "🔁", discord.ButtonStyle.primary),
     "report": ("Report win", "🏆", discord.ButtonStyle.success),
     "approve": ("Approve", "✅", discord.ButtonStyle.success),
     "deny": ("Deny", "❌", discord.ButtonStyle.danger),
@@ -50,9 +52,13 @@ def draft_turn(pick_index: int, draft_type: str = "snake") -> str:
     return "A" if pick_index % 2 == (pick_index // 2) % 2 else "B"
 
 
-def draft_label(lobby: Lobby) -> str:
-    name, order = DRAFT_TYPES.get(lobby.draft_type, DRAFT_TYPES["snake"])
+def draft_label_of(draft_type: str) -> str:
+    name, order = DRAFT_TYPES.get(draft_type, DRAFT_TYPES["snake"])
     return f"{name} ({order})"
+
+
+def draft_label(lobby: Lobby) -> str:
+    return draft_label_of(lobby.draft_type)
 
 
 def other_team(team: str) -> str:
@@ -77,7 +83,7 @@ def team_members(players: List[LobbyPlayer], team: str) -> List[LobbyPlayer]:
 
 
 class LobbyButton(discord.ui.DynamicItem[discord.ui.Button],
-                  template=r"lobby:(?P<action>join|leave|start|cancel|claim|unclaim|lock|report|approve|deny)"
+                  template=r"lobby:(?P<action>join|leave|start|cancel|claim|unclaim|lock|snake|normal|report|approve|deny)"
                            r":(?P<id>\d+)"):
     """All buttons of a captains game. The lobby ID lives in the custom_id, so they keep working after a restart."""
 
@@ -131,7 +137,6 @@ def build_queue_embed(lobby: Lobby, players: List[LobbyPlayer]) -> discord.Embed
                     value=truncate_field("\n".join(lines) or "Nobody yet"), inline=False)
     if lobby.status == "queue":
         embed.description = (f"Click **Join** to play. Host: <@{lobby.creator_id}>\n"
-                             f"Draft: **{draft_label(lobby)}**\n"
                              "When the number of players is even, the host clicks **Start**.")
         if len(players) < MIN_PLAYERS:
             embed.set_footer(text=f"Need at least {MIN_PLAYERS} players to start.")
@@ -178,8 +183,7 @@ def build_game_embed(lobby: Lobby, players: List[LobbyPlayer]) -> discord.Embed:
             embed.description = "This game was cancelled."
         else:
             embed.description = ("Who wants to be captain? Click **Be captain**.\n"
-                                 "When there are 2 captains, a captain clicks **Lock in** to start the draft.\n"
-                                 f"Draft: **{draft_label(lobby)}**")
+                                 "When there are 2 captains, a captain clicks **Lock in** to start the draft.")
             embed.set_footer(text="A coin flip decides which captain picks first.")
         return embed
 
@@ -196,7 +200,12 @@ def build_game_embed(lobby: Lobby, players: List[LobbyPlayer]) -> discord.Embed:
         embed.add_field(name=f"Available ({len(available)})",
                         value=truncate_field(", ".join(safe(p.name) for p in available)), inline=False)
 
-    if lobby.status == "drafting":
+    if lobby.status == "choosing":
+        embed.description = ("A captain chooses the draft type:\n"
+                             f"🐍 **{draft_label_of('snake')}**: the order goes back and forth.\n"
+                             f"🔁 **{draft_label_of('normal')}**: the teams take turns.")
+        embed.set_footer(text=f"Coin flip: {team_name(lobby, players, 'A')} picks first.")
+    elif lobby.status == "drafting":
         picks_done = sum(1 for p in players if p.pick_no)
         captain = lobby.captain_of(draft_turn(picks_done, lobby.draft_type))
         embed.description = f"Now picking: <@{captain}> (pick {picks_done + 1} of {len(players) - 2})"
@@ -227,6 +236,9 @@ def build_game_view(lobby: Lobby, players: List[LobbyPlayer]) -> Optional[discor
         view.add_item(LobbyButton("unclaim", lobby.id))
         view.add_item(LobbyButton("lock", lobby.id, disabled=not both))
         view.add_item(LobbyButton("cancel", lobby.id))
+    elif lobby.status == "choosing":
+        view.add_item(LobbyButton("snake", lobby.id))
+        view.add_item(LobbyButton("normal", lobby.id))
     elif lobby.status == "drafting":
         available = [(p.user_id, p.name) for p in players if p.team is None]
         chunks = [available[i:i + 25] for i in range(0, len(available), 25)]
@@ -379,10 +391,24 @@ class Captains(commands.Cog):
             return await self.refuse(interaction, "Only a captain can lock in.")
 
         first, second = random.sample([lobby.captain_a, lobby.captain_b], 2)
-        self.db.update_lobby(lobby.id, status="drafting", captain_a=first, captain_b=second)
+        self.db.update_lobby(lobby.id, status="choosing", captain_a=first, captain_b=second)
         self.db.assign_pick(lobby.id, first, "A", 0)
         self.db.assign_pick(lobby.id, second, "B", 0)
         await self.show_game(interaction, lobby)
+
+    async def choose_draft(self, interaction: discord.Interaction, lobby: Lobby, draft_type: str):
+        if lobby.status != "choosing":
+            return await self.refuse(interaction, "The draft type is already chosen.")
+        if interaction.user.id not in (lobby.captain_a, lobby.captain_b) and not is_admin(interaction):
+            return await self.refuse(interaction, "Only a captain can choose the draft type.")
+        self.db.update_lobby(lobby.id, status="drafting", draft_type=draft_type)
+        await self.show_game(interaction, lobby)
+
+    async def on_snake(self, interaction: discord.Interaction, lobby: Lobby, players: List[LobbyPlayer]):
+        await self.choose_draft(interaction, lobby, "snake")
+
+    async def on_normal(self, interaction: discord.Interaction, lobby: Lobby, players: List[LobbyPlayer]):
+        await self.choose_draft(interaction, lobby, "normal")
 
     async def handle_pick(self, interaction: discord.Interaction, lobby_id: int, user_id: int):
         lobby = self.db.get_lobby(lobby_id)
@@ -472,16 +498,10 @@ class Captains(commands.Cog):
 
     @app_commands.guild_only()
     @app_commands.command(name="captains", description="Start a queue. Two captains pick the teams.")
-    @app_commands.describe(draft="Pick order. Snake: 1 2 2 1 1 2 … Normal: 1 2 1 2 … (empty = snake)")
-    @app_commands.choices(draft=[
-        app_commands.Choice(name="Snake draft (1 2 2 1 1 2 2 1 …)", value="snake"),
-        app_commands.Choice(name="Normal draft (1 2 1 2 1 2 …)", value="normal"),
-    ])
-    async def captains(self, interaction: discord.Interaction,
-                       draft: Optional[app_commands.Choice[str]] = None):
+    async def captains(self, interaction: discord.Interaction):
         event = self.db.get_event_by_channel(interaction.channel_id)
         lobby_id = self.db.create_lobby(interaction.guild_id, interaction.channel_id, interaction.user.id,
-                                        event.id if event else None, draft.value if draft else "snake")
+                                        event.id if event else None)
         self.db.add_lobby_player(lobby_id, interaction.user.id, interaction.user.display_name)
         lobby = self.db.get_lobby(lobby_id)
         players = self.db.lobby_players(lobby_id)

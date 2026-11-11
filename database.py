@@ -45,7 +45,7 @@ CREATE TABLE IF NOT EXISTS poll_votes (
     PRIMARY KEY (poll_id, user_id)
 );
 
--- Captains games started with /captains: queue -> captains -> drafting -> playing -> reported -> done
+-- Captains games started with /captains: queue -> captains -> choosing -> drafting -> playing -> reported -> done
 CREATE TABLE IF NOT EXISTS lobbies (
     id               INTEGER PRIMARY KEY AUTOINCREMENT,
     guild_id         INTEGER NOT NULL,
@@ -54,7 +54,7 @@ CREATE TABLE IF NOT EXISTS lobbies (
     event_id         INTEGER REFERENCES events(id) ON DELETE SET NULL,  -- set when started in an event channel
     queue_message_id INTEGER,
     draft_message_id INTEGER,
-    status           TEXT    NOT NULL DEFAULT 'queue',  -- queue, captains, drafting, playing, reported, done, cancelled
+    status           TEXT    NOT NULL DEFAULT 'queue',  -- queue, captains, choosing, drafting, playing, reported, done, cancelled
     captain_a        INTEGER,
     captain_b        INTEGER,
     winner           TEXT,     -- 'A' or 'B' once a win is reported
