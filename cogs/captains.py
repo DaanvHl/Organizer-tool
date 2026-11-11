@@ -35,9 +35,24 @@ BUTTONS = {
 }
 
 
-def draft_turn(pick_index: int) -> str:
-    """Team that makes the given (0-based) pick in a snake draft: A B B A A B B A …"""
+DRAFT_TYPES = {
+    # value: (name, order shown to players)
+    "snake": ("Snake draft", "1 2 2 1 1 2 2 1 …"),
+    "normal": ("Normal draft", "1 2 1 2 1 2 …"),
+}
+
+
+def draft_turn(pick_index: int, draft_type: str = "snake") -> str:
+    """Team that makes the given (0-based) pick.
+    Snake: A B B A A B B A … · Normal: A B A B …"""
+    if draft_type == "normal":
+        return "A" if pick_index % 2 == 0 else "B"
     return "A" if pick_index % 2 == (pick_index // 2) % 2 else "B"
+
+
+def draft_label(lobby: Lobby) -> str:
+    name, order = DRAFT_TYPES.get(lobby.draft_type, DRAFT_TYPES["snake"])
+    return f"{name} ({order})"
 
 
 def other_team(team: str) -> str:
@@ -116,6 +131,7 @@ def build_queue_embed(lobby: Lobby, players: List[LobbyPlayer]) -> discord.Embed
                     value=truncate_field("\n".join(lines) or "Nobody yet"), inline=False)
     if lobby.status == "queue":
         embed.description = (f"Click **Join** to play. Host: <@{lobby.creator_id}>\n"
+                             f"Draft: **{draft_label(lobby)}**\n"
                              "When the number of players is even, the host clicks **Start**.")
         if len(players) < MIN_PLAYERS:
             embed.set_footer(text=f"Need at least {MIN_PLAYERS} players to start.")
@@ -162,15 +178,17 @@ def build_game_embed(lobby: Lobby, players: List[LobbyPlayer]) -> discord.Embed:
             embed.description = "This game was cancelled."
         else:
             embed.description = ("Who wants to be captain? Click **Be captain**.\n"
-                                 "When there are 2 captains, a captain clicks **Lock in** to start the draft.")
+                                 "When there are 2 captains, a captain clicks **Lock in** to start the draft.\n"
+                                 f"Draft: **{draft_label(lobby)}**")
             embed.set_footer(text="A coin flip decides which captain picks first.")
         return embed
 
     embed = discord.Embed(title="⚔️ Captains draft", color=discord.Color.red())
     for team in ("A", "B"):
         crown = "🏆 " if lobby.status == "done" and lobby.winner == team else ""
-        lines = [f"👑 {safe(p.name)}" if p.pick_no == 0 else f"{p.pick_no}. {safe(p.name)}"
-                 for p in team_members(players, team)]
+        # Number each team on its own: the captain is 1, then 2, 3, 4 …
+        lines = [f"{number}. {'👑 ' if p.pick_no == 0 else ''}{safe(p.name)}"
+                 for number, p in enumerate(team_members(players, team), start=1)]
         embed.add_field(name=f"{crown}{TEAM_EMOJI[team]} {team_name(lobby, players, team)}"[:256],
                         value=truncate_field("\n".join(lines)), inline=True)
     available = [p for p in players if p.team is None]
@@ -180,9 +198,9 @@ def build_game_embed(lobby: Lobby, players: List[LobbyPlayer]) -> discord.Embed:
 
     if lobby.status == "drafting":
         picks_done = sum(1 for p in players if p.pick_no)
-        captain = lobby.captain_of(draft_turn(picks_done))
+        captain = lobby.captain_of(draft_turn(picks_done, lobby.draft_type))
         embed.description = f"Now picking: <@{captain}> (pick {picks_done + 1} of {len(players) - 2})"
-        embed.set_footer(text="Snake order: X O O X X O O X … · Only the captain whose turn it is can pick.")
+        embed.set_footer(text=f"{draft_label(lobby)} · Only the captain whose turn it is can pick.")
     elif lobby.status == "playing":
         embed.color = discord.Color.green()
         embed.description = "✅ Draft complete! After the game, the winning captain clicks **Report win**."
@@ -375,7 +393,7 @@ class Captains(commands.Cog):
         # No awaits between reading the turn and saving the pick, so two quick clicks can't both count.
         players = self.db.lobby_players(lobby.id)
         picks_done = sum(1 for p in players if p.pick_no)
-        team = draft_turn(picks_done)
+        team = draft_turn(picks_done, lobby.draft_type)
         captain = lobby.captain_of(team)
         if interaction.user.id != captain:
             if interaction.user.id in (lobby.captain_a, lobby.captain_b):
@@ -392,7 +410,7 @@ class Captains(commands.Cog):
         self.db.assign_pick(lobby.id, user_id, team, picks_done + 1)
         remaining = [p for p in players if p.team is None and p.user_id != user_id]
         if len(remaining) == 1:
-            last, last_team = remaining[0], draft_turn(picks_done + 1)
+            last, last_team = remaining[0], draft_turn(picks_done + 1, lobby.draft_type)
             self.db.assign_pick(lobby.id, last.user_id, last_team, picks_done + 2)
             remaining = []
         if not remaining:
@@ -454,10 +472,16 @@ class Captains(commands.Cog):
 
     @app_commands.guild_only()
     @app_commands.command(name="captains", description="Start a queue. Two captains pick the teams.")
-    async def captains(self, interaction: discord.Interaction):
+    @app_commands.describe(draft="Pick order. Snake: 1 2 2 1 1 2 … Normal: 1 2 1 2 … (empty = snake)")
+    @app_commands.choices(draft=[
+        app_commands.Choice(name="Snake draft (1 2 2 1 1 2 2 1 …)", value="snake"),
+        app_commands.Choice(name="Normal draft (1 2 1 2 1 2 …)", value="normal"),
+    ])
+    async def captains(self, interaction: discord.Interaction,
+                       draft: Optional[app_commands.Choice[str]] = None):
         event = self.db.get_event_by_channel(interaction.channel_id)
         lobby_id = self.db.create_lobby(interaction.guild_id, interaction.channel_id, interaction.user.id,
-                                        event.id if event else None)
+                                        event.id if event else None, draft.value if draft else "snake")
         self.db.add_lobby_player(lobby_id, interaction.user.id, interaction.user.display_name)
         lobby = self.db.get_lobby(lobby_id)
         players = self.db.lobby_players(lobby_id)

@@ -62,7 +62,8 @@ CREATE TABLE IF NOT EXISTS lobbies (
     team_a_role      INTEGER,
     team_b_role      INTEGER,
     team_a_voice     INTEGER,
-    team_b_voice     INTEGER
+    team_b_voice     INTEGER,
+    draft_type       TEXT    NOT NULL DEFAULT 'snake'  -- 'snake' (A B B A ...) or 'normal' (A B A B ...)
 );
 
 CREATE TABLE IF NOT EXISTS lobby_players (
@@ -99,6 +100,7 @@ MIGRATIONS = [
     ("participants", "choice", "INTEGER"),  # index into poll_options
     ("events", "signups_closed", "INTEGER NOT NULL DEFAULT 0"),
     ("events", "autoclosed", "INTEGER NOT NULL DEFAULT 0"),  # sign-ups were closed at start time
+    ("lobbies", "draft_type", "TEXT NOT NULL DEFAULT 'snake'"),  # 'snake' or 'normal'
 ]
 
 
@@ -172,6 +174,7 @@ class Lobby:
     team_b_role: Optional[int] = None
     team_a_voice: Optional[int] = None
     team_b_voice: Optional[int] = None
+    draft_type: str = "snake"
 
     def captain_of(self, team: str) -> Optional[int]:
         return self.captain_a if team == "A" else self.captain_b
@@ -375,10 +378,11 @@ class Database:
 
     # --- captains lobbies ---------------------------------------------------
 
-    def create_lobby(self, guild_id: int, channel_id: int, creator_id: int, event_id: Optional[int]) -> int:
+    def create_lobby(self, guild_id: int, channel_id: int, creator_id: int, event_id: Optional[int],
+                     draft_type: str = "snake") -> int:
         cur = self.conn.execute(
-            "INSERT INTO lobbies (guild_id, channel_id, creator_id, event_id) VALUES (?, ?, ?, ?)",
-            (guild_id, channel_id, creator_id, event_id),
+            "INSERT INTO lobbies (guild_id, channel_id, creator_id, event_id, draft_type) VALUES (?, ?, ?, ?, ?)",
+            (guild_id, channel_id, creator_id, event_id, draft_type),
         )
         self.conn.commit()
         return cur.lastrowid
@@ -387,7 +391,7 @@ class Database:
         row = self.conn.execute(
             "SELECT id, guild_id, channel_id, creator_id, event_id, queue_message_id, draft_message_id, "
             "status, captain_a, captain_b, winner, reported_by, "
-            "team_a_role, team_b_role, team_a_voice, team_b_voice FROM lobbies WHERE id = ?", (lobby_id,)
+            "team_a_role, team_b_role, team_a_voice, team_b_voice, draft_type FROM lobbies WHERE id = ?", (lobby_id,)
         ).fetchone()
         return Lobby(**dict(row)) if row else None
 

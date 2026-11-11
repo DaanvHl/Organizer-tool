@@ -53,7 +53,8 @@ live. This works whether sign-ups are open or closed.
 it is the host and is in the queue already). When there is an even number of players (at least 4),
 the host clicks **Start**. A new message appears where players click **Be captain** (or **Step down**);
 when there are 2 captains, a captain clicks **Lock in**. A coin flip decides who picks first, then the
-captains pick players in snake order (X O O X X O O X …). Only the captain whose turn it is can pick;
+captains pick players. The host chooses the order with the `draft` option of `/captains`: **Snake**
+(1 2 2 1 1 2 2 1 …, the default) or **Normal** (1 2 1 2 …). Only the captain whose turn it is can pick;
 the last player is assigned automatically. The host or an admin can **Cancel** before the draft starts.
 
 After the game, the winning captain clicks **Report win**. The other captain must click **Approve**
