@@ -57,7 +57,7 @@ CREATE TABLE IF NOT EXISTS lobbies (
     status           TEXT    NOT NULL DEFAULT 'queue',  -- queue, captains, choosing, drafting, playing, reported, done, cancelled
     captain_a        INTEGER,
     captain_b        INTEGER,
-    winner           TEXT,     -- 'A' or 'B' once a win is reported
+    winner           TEXT,     -- 'A', 'B' or 'draw' once a result is reported
     reported_by      INTEGER,
     team_a_role      INTEGER,
     team_b_role      INTEGER,
@@ -75,12 +75,13 @@ CREATE TABLE IF NOT EXISTS lobby_players (
     PRIMARY KEY (lobby_id, user_id)
 );
 
--- Wins and losses from approved /captains games
+-- Wins, losses and draws from approved /captains games
 CREATE TABLE IF NOT EXISTS player_stats (
     guild_id INTEGER NOT NULL,
     user_id  INTEGER NOT NULL,
     wins     INTEGER NOT NULL DEFAULT 0,
     losses   INTEGER NOT NULL DEFAULT 0,
+    draws    INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (guild_id, user_id)
 );
 
@@ -101,6 +102,7 @@ MIGRATIONS = [
     ("events", "signups_closed", "INTEGER NOT NULL DEFAULT 0"),
     ("events", "autoclosed", "INTEGER NOT NULL DEFAULT 0"),  # sign-ups were closed at start time
     ("lobbies", "draft_type", "TEXT NOT NULL DEFAULT 'snake'"),  # 'snake' or 'normal'
+    ("player_stats", "draws", "INTEGER NOT NULL DEFAULT 0"),
 ]
 
 
@@ -451,10 +453,11 @@ class Database:
         )
         self.conn.commit()
 
-    # --- wins and losses ----------------------------------------------------
+    # --- wins, losses and draws ---------------------------------------------
 
-    def record_result(self, guild_id: int, winners: List[int], losers: List[int]) -> None:
-        for user_ids, column in ((winners, "wins"), (losers, "losses")):
+    def record_result(self, guild_id: int, winners: List[int], losers: List[int],
+                      draws: List[int] = ()) -> None:
+        for user_ids, column in ((winners, "wins"), (losers, "losses"), (draws, "draws")):
             for user_id in user_ids:
                 self.conn.execute(
                     f"INSERT INTO player_stats (guild_id, user_id, {column}) VALUES (?, ?, 1) "
@@ -464,24 +467,25 @@ class Database:
         self.conn.commit()
 
     def player_stats(self, guild_id: int, user_id: int) -> tuple:
-        """(wins, losses) of the user in this server."""
+        """(wins, losses, draws) of the user in this server."""
         row = self.conn.execute(
-            "SELECT wins, losses FROM player_stats WHERE guild_id = ? AND user_id = ?", (guild_id, user_id)
+            "SELECT wins, losses, draws FROM player_stats WHERE guild_id = ? AND user_id = ?", (guild_id, user_id)
         ).fetchone()
-        return (row["wins"], row["losses"]) if row else (0, 0)
+        return (row["wins"], row["losses"], row["draws"]) if row else (0, 0, 0)
 
     def stats_leaderboard(self, guild_id: int, limit: int, offset: int = 0) -> List[tuple]:
-        """(user_id, wins, losses) for everyone who played, most wins first (fewest losses on a tie)."""
+        """(user_id, wins, losses, draws) for everyone who played, most wins first
+        (fewest losses, then most draws on a tie)."""
         rows = self.conn.execute(
-            "SELECT user_id, wins, losses FROM player_stats WHERE guild_id = ? AND wins + losses > 0 "
-            "ORDER BY wins DESC, losses, user_id LIMIT ? OFFSET ?",
+            "SELECT user_id, wins, losses, draws FROM player_stats WHERE guild_id = ? "
+            "AND wins + losses + draws > 0 ORDER BY wins DESC, losses, draws DESC, user_id LIMIT ? OFFSET ?",
             (guild_id, limit, offset),
         ).fetchall()
-        return [(r["user_id"], r["wins"], r["losses"]) for r in rows]
+        return [(r["user_id"], r["wins"], r["losses"], r["draws"]) for r in rows]
 
     def stats_player_count(self, guild_id: int) -> int:
         row = self.conn.execute(
-            "SELECT COUNT(*) AS n FROM player_stats WHERE guild_id = ? AND wins + losses > 0", (guild_id,)
+            "SELECT COUNT(*) AS n FROM player_stats WHERE guild_id = ? AND wins + losses + draws > 0", (guild_id,)
         ).fetchone()
         return row["n"]
 

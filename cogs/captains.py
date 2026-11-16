@@ -32,10 +32,13 @@ BUTTONS = {
     "snake": ("Snake draft", "🐍", discord.ButtonStyle.primary),
     "normal": ("Normal draft", "🔁", discord.ButtonStyle.primary),
     "report": ("Report win", "🏆", discord.ButtonStyle.success),
+    "draw": ("Report draw", "🤝", discord.ButtonStyle.secondary),
     "approve": ("Approve", "✅", discord.ButtonStyle.success),
     "deny": ("Deny", "❌", discord.ButtonStyle.danger),
 }
 
+
+DRAW = "draw"  # value of lobby.winner when the game ended in a draw
 
 DRAFT_TYPES = {
     # value: (name, order shown to players)
@@ -65,6 +68,11 @@ def other_team(team: str) -> str:
     return "B" if team == "A" else "A"
 
 
+def other_captain(lobby: Lobby, user_id: int) -> Optional[int]:
+    """The captain who is not user_id."""
+    return lobby.captain_b if user_id == lobby.captain_a else lobby.captain_a
+
+
 def is_admin(interaction: discord.Interaction) -> bool:
     return interaction.user.guild_permissions.manage_guild
 
@@ -83,7 +91,7 @@ def team_members(players: List[LobbyPlayer], team: str) -> List[LobbyPlayer]:
 
 
 class LobbyButton(discord.ui.DynamicItem[discord.ui.Button],
-                  template=r"lobby:(?P<action>join|leave|start|cancel|claim|unclaim|lock|snake|normal|report|approve|deny)"
+                  template=r"lobby:(?P<action>join|leave|start|cancel|claim|unclaim|lock|snake|normal|report|draw|approve|deny)"
                            r":(?P<id>\d+)"):
     """All buttons of a captains game. The lobby ID lives in the custom_id, so they keep working after a restart."""
 
@@ -212,16 +220,24 @@ def build_game_embed(lobby: Lobby, players: List[LobbyPlayer]) -> discord.Embed:
         embed.set_footer(text=f"{draft_label(lobby)} · Only the captain whose turn it is can pick.")
     elif lobby.status == "playing":
         embed.color = discord.Color.green()
-        embed.description = "✅ Draft complete! After the game, the winning captain clicks **Report win**."
+        embed.description = ("✅ Draft complete! After the game, the winning captain clicks **Report win**.\n"
+                             "Nobody won? A captain clicks **Report draw**.")
     elif lobby.status == "reported":
         embed.color = discord.Color.gold()
-        loser = lobby.captain_of(other_team(lobby.winner))
-        embed.description = (f"🏆 <@{lobby.reported_by}> says **{team_name(lobby, players, lobby.winner)}** "
-                             f"won.\n<@{loser}>, is this true? Click **Approve** or **Deny**.")
+        other = other_captain(lobby, lobby.reported_by)
+        if lobby.winner == DRAW:
+            claim = f"🤝 <@{lobby.reported_by}> says the game was a **draw**."
+        else:
+            claim = f"🏆 <@{lobby.reported_by}> says **{team_name(lobby, players, lobby.winner)}** won."
+        embed.description = f"{claim}\n<@{other}>, is this true? Click **Approve** or **Deny**."
     elif lobby.status == "done":
         embed.color = discord.Color.gold()
-        embed.description = f"🏆 **{team_name(lobby, players, lobby.winner)}** won!"
-        embed.set_footer(text="Winners got +1 win, losers +1 loss. See /leaderboard")
+        if lobby.winner == DRAW:
+            embed.description = "🤝 The game was a **draw**!"
+            embed.set_footer(text="Everyone got +1 draw. See /leaderboard")
+        else:
+            embed.description = f"🏆 **{team_name(lobby, players, lobby.winner)}** won!"
+            embed.set_footer(text="Winners got +1 win, losers +1 loss. See /leaderboard")
     else:
         embed.color = discord.Color.dark_grey()
         embed.description = "This game was cancelled."
@@ -249,6 +265,7 @@ def build_game_view(lobby: Lobby, players: List[LobbyPlayer]) -> Optional[discor
             view.add_item(DraftSelect(lobby.id, index, chunk, placeholder))
     elif lobby.status == "playing":
         view.add_item(LobbyButton("report", lobby.id))
+        view.add_item(LobbyButton("draw", lobby.id))
     elif lobby.status == "reported":
         view.add_item(LobbyButton("approve", lobby.id))
         view.add_item(LobbyButton("deny", lobby.id))
@@ -258,14 +275,15 @@ def build_game_view(lobby: Lobby, players: List[LobbyPlayer]) -> Optional[discor
 
 
 def build_leaderboard_embed(rows: list, offset: int, page: int, pages: int) -> discord.Embed:
-    """rows: (name, wins, losses) for one page. Plain names, so nobody gets pinged."""
+    """rows: (name, wins, losses, draws) for one page. Plain names, so nobody gets pinged."""
     lines = []
-    for rank, (name, wins, losses) in enumerate(rows, start=offset + 1):
-        rate = round(100 * wins / (wins + losses))
-        lines.append(f"{rank_label(rank)} {safe(name)} · **{wins}** W · **{losses}** L · {rate}%")
+    for rank, (name, wins, losses, draws) in enumerate(rows, start=offset + 1):
+        rate = round(100 * wins / (wins + losses + draws))
+        lines.append(f"{rank_label(rank)} {safe(name)} · **{wins}** W · **{losses}** L · "
+                     f"**{draws}** D · {rate}%")
     embed = discord.Embed(title="🏆 Captains leaderboard", description="\n".join(lines),
                           color=discord.Color.gold())
-    embed.set_footer(text=f"Page {page + 1} of {pages} · W = wins, L = losses")
+    embed.set_footer(text=f"Page {page + 1} of {pages} · W = wins, L = losses, D = draws")
     return embed
 
 
@@ -460,30 +478,44 @@ class Captains(commands.Cog):
 
     async def on_report(self, interaction: discord.Interaction, lobby: Lobby, players: List[LobbyPlayer]):
         if lobby.status != "playing":
-            return await self.refuse(interaction, "A win was already reported.")
+            return await self.refuse(interaction, "A result was already reported.")
         team = lobby.team_of_captain(interaction.user.id)
         if team is None:
             return await self.refuse(interaction, "Only the captain of the winning team can report the win.")
-        self.db.update_lobby(lobby.id, status="reported", winner=team, reported_by=interaction.user.id)
+        await self.report_result(interaction, lobby, team)
+
+    async def on_draw(self, interaction: discord.Interaction, lobby: Lobby, players: List[LobbyPlayer]):
+        if lobby.status != "playing":
+            return await self.refuse(interaction, "A result was already reported.")
+        if lobby.team_of_captain(interaction.user.id) is None:
+            return await self.refuse(interaction, "Only a captain can report a draw.")
+        await self.report_result(interaction, lobby, DRAW)
+
+    async def report_result(self, interaction: discord.Interaction, lobby: Lobby, winner: str):
+        """winner: 'A', 'B' or DRAW. The other captain must approve it."""
+        self.db.update_lobby(lobby.id, status="reported", winner=winner, reported_by=interaction.user.id)
         await self.show_game(interaction, lobby)
-        other = lobby.captain_of(other_team(team))
+        other = other_captain(lobby, interaction.user.id)
         await interaction.followup.send(
-            f"<@{other}>, please approve or deny the win on the message above.",
+            f"<@{other}>, please approve or deny the result on the message above.",
             allowed_mentions=discord.AllowedMentions(users=[discord.Object(other)]))
 
     async def on_approve(self, interaction: discord.Interaction, lobby: Lobby, players: List[LobbyPlayer]):
         if lobby.status != "reported":
             return await self.refuse(interaction, "There is nothing to approve.")
         if interaction.user.id == lobby.reported_by:
-            other = lobby.captain_of(other_team(lobby.winner))
+            other = other_captain(lobby, lobby.reported_by)
             return await self.refuse(interaction, f"You can't approve your own report. Wait for <@{other}>.")
         if interaction.user.id not in (lobby.captain_a, lobby.captain_b) and not is_admin(interaction):
             return await self.refuse(interaction, "Only the other captain can approve.")
 
-        winners = [p.user_id for p in players if p.team == lobby.winner]
-        losers = [p.user_id for p in players if p.team == other_team(lobby.winner)]
         self.db.update_lobby(lobby.id, status="done")
-        self.db.record_result(interaction.guild_id, winners, losers)
+        if lobby.winner == DRAW:
+            self.db.record_result(interaction.guild_id, [], [], draws=[p.user_id for p in players if p.team])
+        else:
+            winners = [p.user_id for p in players if p.team == lobby.winner]
+            losers = [p.user_id for p in players if p.team == other_team(lobby.winner)]
+            self.db.record_result(interaction.guild_id, winners, losers)
         await self.show_game(interaction, lobby)
 
     async def on_deny(self, interaction: discord.Interaction, lobby: Lobby, players: List[LobbyPlayer]):
@@ -511,21 +543,22 @@ class Captains(commands.Cog):
         self.db.update_lobby(lobby_id, queue_message_id=message.id)
 
     @app_commands.guild_only()
-    @app_commands.command(name="stats", description="See how many captains games someone won and lost")
+    @app_commands.command(name="stats", description="See how many captains games someone won, lost and drew")
     @app_commands.describe(member="The player to check (empty = you)")
     async def stats(self, interaction: discord.Interaction, member: Optional[discord.Member] = None):
         member = member or interaction.user
-        wins, losses = self.db.player_stats(interaction.guild_id, member.id)
-        if wins + losses == 0:
+        wins, losses, draws = self.db.player_stats(interaction.guild_id, member.id)
+        games = wins + losses + draws
+        if games == 0:
             text = f"{member.mention} has not played a captains game yet."
         else:
-            rate = round(100 * wins / (wins + losses))
-            text = (f"📊 {member.mention}: **{wins}** wins · **{losses}** losses · "
-                    f"{wins + losses} games · {rate}% won")
+            rate = round(100 * wins / games)
+            text = (f"📊 {member.mention}: **{wins}** wins · **{losses}** losses · **{draws}** draws · "
+                    f"{games} games · {rate}% won")
         await interaction.response.send_message(text, allowed_mentions=discord.AllowedMentions.none())
 
     @app_commands.guild_only()
-    @app_commands.command(name="leaderboard", description="See the wins and losses of all captains players")
+    @app_commands.command(name="leaderboard", description="See the wins, losses and draws of all captains players")
     async def leaderboard(self, interaction: discord.Interaction):
         guild_id = interaction.guild_id
         if self.db.stats_player_count(guild_id) == 0:

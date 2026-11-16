@@ -60,7 +60,8 @@ the last player is assigned automatically. The host or an admin can **Cancel** b
 After the game, the winning captain clicks **Report win**. The other captain must click **Approve**
 (or **Deny**, then the game goes on and the real winner can report again). Admins can also approve.
 After approval, every player of the winning team gets a win and every player of the losing team a loss.
-`/stats [member]` shows one player's wins and losses, `/leaderboard` shows everyone who ever played
+If nobody won, a captain clicks **Report draw** instead; after the other captain approves, every player gets a draw.
+`/stats [member]` shows one player's wins, losses and draws, `/leaderboard` shows everyone who ever played
 (most wins first, 10 per page).
 
 **Team voice channels:** when a `/captains` draft in an event channel completes, each team gets a role and a private voice channel
