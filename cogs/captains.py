@@ -1,6 +1,7 @@
 import logging
 import random
 import re
+import unicodedata
 from typing import List, Optional
 
 import discord
@@ -8,7 +9,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from cogs.events import truncate_field
-from cogs.fun import LeaderboardView, rank_label
+from cogs.fun import LeaderboardView
 from config import REFEREE_ROLE_IDS
 from database import LOSS_POINTS, WIN_POINTS, Database, Lobby, LobbyPlayer
 
@@ -330,25 +331,41 @@ def build_approval_view(lobby: Lobby) -> discord.ui.View:
     return view
 
 
-NAME_LENGTH = 18  # longer names are cut off with "…", so a name fits on one line of a leaderboard card
+NAME_WIDTH = 15  # leaderboard name column; a whole row is 32 characters, so it fits on a phone
 
 
-def short_name(name: str) -> str:
-    name = " ".join(name.split())
-    return name if len(name) <= NAME_LENGTH else name[:NAME_LENGTH - 1].rstrip() + "…"
+def char_width(char: str) -> int:
+    """Columns a character takes in a monospace font: 2 for wide (e.g. Chinese) characters, 0 for accents."""
+    if unicodedata.combining(char):
+        return 0
+    return 2 if unicodedata.east_asian_width(char) in ("W", "F") else 1
+
+
+def fit(text: str, width: int) -> str:
+    """Cuts text to the given number of columns ("…" when cut) and pads it with spaces to exactly that width."""
+    text = "".join(c for c in text if unicodedata.category(c) not in ("Cc", "Cf", "So", "Cs"))  # no emoji
+    text = " ".join(text.split()).replace("`", "'")  # a backtick would end the monospace tag
+    if sum(map(char_width, text)) > width:
+        cut, used = "", 0
+        for char in text:
+            if used + char_width(char) > width - 1:  # keep 1 column for "…"
+                break
+            cut += char
+            used += char_width(char)
+        text = cut.rstrip() + "…"
+    return text + " " * (width - sum(map(char_width, text)))
 
 
 def build_leaderboard_embed(rows: list, offset: int, page: int, pages: int) -> discord.Embed:
     """rows: (name, points, wins, losses, draws) for one page. Plain names, so nobody gets pinged.
-    One small card (inline field) per player: on PC Discord shows 3 cards per row, on a phone the cards
-    stack under each other. Every card has the same shape, so it looks tidy on both."""
-    embed = discord.Embed(title="🏆 Captains leaderboard", color=discord.Color.gold())
+    One row per player in a small monospace tag, so the columns line up. A row is only 32 characters,
+    so it does not wrap on a phone."""
+    lines = [f"` #  {fit('Player', NAME_WIDTH)}  Pts  W  L  D`"]
     for rank, (name, points, wins, losses, draws) in enumerate(rows, start=offset + 1):
-        rate = round(100 * wins / (wins + losses + draws))
-        label = rank_label(rank).replace("**", "")  # field titles are bold already
-        embed.add_field(name=f"{label} {short_name(name)}",
-                        value=f"**{points}** points\n{wins} W · {losses} L · {draws} D · {rate}%", inline=True)
-    embed.set_footer(text=f"Page {page + 1} of {pages} · Win +{WIN_POINTS} points, loss -{LOSS_POINTS} points · "
+        lines.append(f"`{rank:>2}  {fit(name, NAME_WIDTH)} {points:>4} {wins:>2} {losses:>2} {draws:>2}`")
+    embed = discord.Embed(title="🏆 Captains leaderboard", description="\n".join(lines),
+                          color=discord.Color.gold())
+    embed.set_footer(text=f"Page {page + 1} of {pages} · Pts = points (win +{WIN_POINTS}, loss -{LOSS_POINTS}) · "
                           "W = wins, L = losses, D = draws")
     return embed
 
