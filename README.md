@@ -68,8 +68,8 @@ played (most points first, 10 per page). Points for games played before points e
 once, by replaying the old games in order.
 
 **Referees:** members with the `REFEREE_ROLE_ID` role can also approve or deny a captain's report. A referee
-who is not a captain can click **Report win** too: a private message asks which team won, and the result
-counts right away (no approval needed). **Report draw** by such a referee also counts right away.
+who is not a captain can click **Report win** too: a private message asks which team won. Both captains are
+pinged and one of them (or another referee) must **Approve** it. **Report draw** works the same way.
 
 **Team voice channels:** when a `/captains` draft in an event channel completes, each team gets a role and a private voice channel
 (🔴 / 🔵). Players who are in voice are moved automatically. `/event move` moves everyone to their
