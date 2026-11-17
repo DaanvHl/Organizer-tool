@@ -340,17 +340,16 @@ def short_name(name: str) -> str:
 
 def build_leaderboard_embed(rows: list, offset: int, page: int, pages: int) -> discord.Embed:
     """rows: (name, points, wins, losses, draws) for one page. Plain names, so nobody gets pinged.
-    Three columns side by side (player, points, record), so the numbers line up."""
-    players, points_col, records = [], [], []
+    One line per player (works on phones): the numbers come first in a small monospace tag, so they
+    line up on every screen, and the name comes last, so a long name can't push anything out of place."""
+    lines = []
     for rank, (name, points, wins, losses, draws) in enumerate(rows, start=offset + 1):
         rate = round(100 * wins / (wins + losses + draws))
-        players.append(f"{rank_label(rank)} {safe(short_name(name))}")
-        points_col.append(f"**{points}**")
-        records.append(f"{wins} W · {losses} L · {draws} D · {rate}%")
-    embed = discord.Embed(title="🏆 Captains leaderboard", color=discord.Color.gold())
-    embed.add_field(name="Player", value="\n".join(players), inline=True)
-    embed.add_field(name="Points", value="\n".join(points_col), inline=True)
-    embed.add_field(name="Record", value="\n".join(records), inline=True)
+        stats = f"{rank:>2}. {points:>4} pts {wins:>2}W {losses:>2}L {draws:>2}D {rate:>3}%"
+        medal = rank_label(rank) + " " if rank <= 3 else ""
+        lines.append(f"`{stats}` {medal}**{safe(short_name(name))}**")
+    embed = discord.Embed(title="🏆 Captains leaderboard", description="\n".join(lines),
+                          color=discord.Color.gold())
     embed.set_footer(text=f"Page {page + 1} of {pages} · Win +{WIN_POINTS} points, loss -{LOSS_POINTS} points · "
                           "W = wins, L = losses, D = draws")
     return embed
