@@ -1,6 +1,7 @@
 import logging
 import random
 import re
+import unicodedata
 from typing import List, Optional
 
 import discord
@@ -8,7 +9,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from cogs.events import truncate_field
-from cogs.fun import LeaderboardView, rank_label
+from cogs.fun import LeaderboardView
 from config import REFEREE_ROLE_IDS
 from database import LOSS_POINTS, WIN_POINTS, Database, Lobby, LobbyPlayer
 
@@ -319,16 +320,42 @@ def build_game_view(lobby: Lobby, players: List[LobbyPlayer]) -> Optional[discor
     return view
 
 
+NAME_WIDTH = 20  # leaderboard name column; longer names are cut off with "…"
+
+
+def char_width(char: str) -> int:
+    """Columns a character takes in a monospace font: 2 for wide (e.g. Chinese) characters, 0 for accents."""
+    if unicodedata.combining(char):
+        return 0
+    return 2 if unicodedata.east_asian_width(char) in ("W", "F") else 1
+
+
+def fit(text: str, width: int) -> str:
+    """Cuts text to the given number of columns and pads it with spaces to exactly that width."""
+    text = "".join(c for c in text if unicodedata.category(c) not in ("Cc", "Cf", "So", "Cs"))  # no emoji
+    text = " ".join(text.split())
+    if sum(map(char_width, text)) > width:
+        cut, used = "", 0
+        for char in text:
+            if used + char_width(char) > width - 1:  # keep 1 column for "…"
+                break
+            cut += char
+            used += char_width(char)
+        text = cut.rstrip() + "…"
+    return text + " " * (width - sum(map(char_width, text)))
+
+
 def build_leaderboard_embed(rows: list, offset: int, page: int, pages: int) -> discord.Embed:
-    """rows: (name, points, wins, losses, draws) for one page. Plain names, so nobody gets pinged."""
-    lines = []
+    """rows: (name, points, wins, losses, draws) for one page. Plain names, so nobody gets pinged.
+    Shown as a table in a code block, so every column lines up."""
+    lines = [f"{'#':>3}  {fit('Player', NAME_WIDTH)}  {'Pts':>4} {'W':>3} {'L':>3} {'D':>3} {'Win':>4}"]
     for rank, (name, points, wins, losses, draws) in enumerate(rows, start=offset + 1):
         rate = round(100 * wins / (wins + losses + draws))
-        lines.append(f"{rank_label(rank)} {safe(name)} · **{points}** pts · {wins} W · {losses} L · "
-                     f"{draws} D · {rate}%")
-    embed = discord.Embed(title="🏆 Captains leaderboard", description="\n".join(lines),
+        lines.append(f"{rank:>3}  {fit(name, NAME_WIDTH)}  {points:>4} {wins:>3} {losses:>3} {draws:>3} {rate:>3}%")
+    table = "\n".join(lines).replace("`", "'")  # a backtick in a name would end the code block
+    embed = discord.Embed(title="🏆 Captains leaderboard", description=f"```\n{table}\n```",
                           color=discord.Color.gold())
-    embed.set_footer(text=f"Page {page + 1} of {pages} · pts = points (win +{WIN_POINTS}, loss -{LOSS_POINTS}) · "
+    embed.set_footer(text=f"Page {page + 1} of {pages} · Pts = points (win +{WIN_POINTS}, loss -{LOSS_POINTS}) · "
                           "W = wins, L = losses, D = draws")
     return embed
 
