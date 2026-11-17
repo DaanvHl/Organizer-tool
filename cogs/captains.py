@@ -330,7 +330,7 @@ def build_approval_view(lobby: Lobby) -> discord.ui.View:
     return view
 
 
-NAME_LENGTH = 18  # longer names are cut off with "…", so a name never wraps onto a 2nd line
+NAME_LENGTH = 26  # longer names are cut off with "…", so a name never wraps on a phone
 
 
 def short_name(name: str) -> str:
@@ -340,14 +340,13 @@ def short_name(name: str) -> str:
 
 def build_leaderboard_embed(rows: list, offset: int, page: int, pages: int) -> discord.Embed:
     """rows: (name, points, wins, losses, draws) for one page. Plain names, so nobody gets pinged.
-    One line per player (works on phones): the numbers come first in a small monospace tag, so they
-    line up on every screen, and the name comes last, so a long name can't push anything out of place."""
+    Two short lines per player, so nothing wraps on a phone: rank + name, then the numbers in a small
+    monospace tag, so they line up under each other on every screen."""
     lines = []
     for rank, (name, points, wins, losses, draws) in enumerate(rows, start=offset + 1):
         rate = round(100 * wins / (wins + losses + draws))
-        stats = f"{rank:>2}. {points:>4} pts {wins:>2}W {losses:>2}L {draws:>2}D {rate:>3}%"
-        medal = rank_label(rank) + " " if rank <= 3 else ""
-        lines.append(f"`{stats}` {medal}**{safe(short_name(name))}**")
+        stats = f"{points:>4} pts {wins:>2}W {losses:>2}L {draws:>2}D {rate:>3}%"
+        lines.append(f"{rank_label(rank)} **{safe(short_name(name))}**\n`{stats}`")
     embed = discord.Embed(title="🏆 Captains leaderboard", description="\n".join(lines),
                           color=discord.Color.gold())
     embed.set_footer(text=f"Page {page + 1} of {pages} · Win +{WIN_POINTS} points, loss -{LOSS_POINTS} points · "
