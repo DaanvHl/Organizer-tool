@@ -34,7 +34,7 @@ Times can be written as `20:00`, `tomorrow 20:00`, `10-10 20:00` or `10-10-2026 
 (interpreted in the `TIMEZONE` from `.env`). Discord shows them to each member in their own timezone.
 
 **Allowed channels:** set `ALLOWED_CHANNEL_IDS` (comma-separated, e.g. `123456789,987654321`) to
-only allow `/event` commands in those channels. Event channels created by the bot always allow
+only allow bot commands in those channels: every command, for everyone (admins too). Event channels created by the bot always allow
 commands, so organizers can still edit, end or cancel their event there.
 
 **Poll:** set `poll: True` on `/event create` to get a form where you enter a question and the

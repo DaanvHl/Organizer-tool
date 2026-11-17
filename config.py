@@ -11,8 +11,8 @@ DISCORD_TOKEN = os.getenv("DISCORD_TOKEN", "")
 # those servers instead of after ~1 hour. Empty registers the commands globally.
 GUILD_IDS = [int(part) for part in os.getenv("GUILD_ID", "").replace(" ", ",").split(",") if part.strip()]
 
-# Channels where /event commands may be used, separated by commas. Empty means everywhere.
-# Event channels created by the bot always allow commands, so events can be managed there.
+# Channels where bot commands (all of them, for everyone, admins too) may be used, separated by commas.
+# Empty means everywhere. Event channels created by the bot always allow commands, so events can be managed there.
 ALLOWED_CHANNEL_IDS = {
     int(part) for part in os.getenv("ALLOWED_CHANNEL_IDS", "").replace(" ", ",").split(",") if part.strip()
 }

@@ -11,12 +11,28 @@ from database import Database
 log = logging.getLogger("bot")
 
 
+class ChannelLimitedTree(discord.app_commands.CommandTree):
+    """Every slash command only works in ALLOWED_CHANNEL_IDS (for everyone, admins too).
+    The only exception: the temporary event channels the bot creates, so events can be managed there."""
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if not config.ALLOWED_CHANNEL_IDS or interaction.channel_id in config.ALLOWED_CHANNEL_IDS:
+            return True
+        if self.client.db.get_event_by_channel(interaction.channel_id) is not None:
+            return True
+        if interaction.type == discord.InteractionType.application_command:
+            channels = ", ".join(f"<#{cid}>" for cid in sorted(config.ALLOWED_CHANNEL_IDS))
+            await interaction.response.send_message(
+                f"You can't use bot commands here. Use them in {channels}.", ephemeral=True)
+        return False  # also no suggestions (autocomplete) outside the allowed channels
+
+
 class EventBot(commands.Bot):
     def __init__(self):
         intents = discord.Intents.default()
         # Reading message text is only needed for the keyword reactions (privileged intent).
         intents.message_content = config.FUN_KEYWORDS
-        super().__init__(command_prefix=commands.when_mentioned, intents=intents)
+        super().__init__(command_prefix=commands.when_mentioned, intents=intents, tree_cls=ChannelLimitedTree)
         self.db = Database(config.DATABASE_PATH)
 
     async def setup_hook(self):
