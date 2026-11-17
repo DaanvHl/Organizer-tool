@@ -330,7 +330,7 @@ def build_approval_view(lobby: Lobby) -> discord.ui.View:
     return view
 
 
-NAME_LENGTH = 26  # longer names are cut off with "…", so a name never wraps on a phone
+NAME_LENGTH = 18  # longer names are cut off with "…", so a name fits on one line of a leaderboard card
 
 
 def short_name(name: str) -> str:
@@ -340,15 +340,14 @@ def short_name(name: str) -> str:
 
 def build_leaderboard_embed(rows: list, offset: int, page: int, pages: int) -> discord.Embed:
     """rows: (name, points, wins, losses, draws) for one page. Plain names, so nobody gets pinged.
-    Two short lines per player, so nothing wraps on a phone: rank + name, then the numbers in a small
-    monospace tag, so they line up under each other on every screen."""
-    lines = []
+    One small card (inline field) per player: on PC Discord shows 3 cards per row, on a phone the cards
+    stack under each other. Every card has the same shape, so it looks tidy on both."""
+    embed = discord.Embed(title="🏆 Captains leaderboard", color=discord.Color.gold())
     for rank, (name, points, wins, losses, draws) in enumerate(rows, start=offset + 1):
         rate = round(100 * wins / (wins + losses + draws))
-        stats = f"{points:>4} pts {wins:>2}W {losses:>2}L {draws:>2}D {rate:>3}%"
-        lines.append(f"{rank_label(rank)} **{safe(short_name(name))}**\n`{stats}`")
-    embed = discord.Embed(title="🏆 Captains leaderboard", description="\n".join(lines),
-                          color=discord.Color.gold())
+        label = rank_label(rank).replace("**", "")  # field titles are bold already
+        embed.add_field(name=f"{label} {short_name(name)}",
+                        value=f"**{points}** points\n{wins} W · {losses} L · {draws} D · {rate}%", inline=True)
     embed.set_footer(text=f"Page {page + 1} of {pages} · Win +{WIN_POINTS} points, loss -{LOSS_POINTS} points · "
                           "W = wins, L = losses, D = draws")
     return embed
