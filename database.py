@@ -54,7 +54,7 @@ CREATE TABLE IF NOT EXISTS lobbies (
     event_id         INTEGER REFERENCES events(id) ON DELETE SET NULL,  -- set when started in an event channel
     queue_message_id INTEGER,
     draft_message_id INTEGER,
-    status           TEXT    NOT NULL DEFAULT 'queue',  -- queue, captains, choosing, drafting, playing, reported, done, cancelled
+    status           TEXT    NOT NULL DEFAULT 'queue',  -- queue, captains, choosing, drafting, playing, reported, done, cancelled, removed
     captain_a        INTEGER,
     captain_b        INTEGER,
     winner           TEXT,     -- 'A', 'B' or 'draw' once a result is reported
@@ -83,6 +83,7 @@ CREATE TABLE IF NOT EXISTS player_stats (
     losses   INTEGER NOT NULL DEFAULT 0,
     draws    INTEGER NOT NULL DEFAULT 0,
     points   INTEGER NOT NULL DEFAULT 0,  -- ranked points: +WIN_POINTS per win, -LOSS_POINTS per loss, never below 0
+    streak   INTEGER NOT NULL DEFAULT 0,  -- wins in a row; a loss sets it to 0, a draw keeps it
     PRIMARY KEY (guild_id, user_id)
 );
 
@@ -104,11 +105,19 @@ MIGRATIONS = [
     ("events", "autoclosed", "INTEGER NOT NULL DEFAULT 0"),  # sign-ups were closed at start time
     ("lobbies", "draft_type", "TEXT NOT NULL DEFAULT 'snake'"),  # 'snake' or 'normal'
     ("player_stats", "draws", "INTEGER NOT NULL DEFAULT 0"),
-    ("player_stats", "points", "INTEGER NOT NULL DEFAULT 0"),  # filled from past games by backfill_points()
+    ("player_stats", "points", "INTEGER NOT NULL DEFAULT 0"),  # filled from past games by recalculate_points()
+    ("player_stats", "streak", "INTEGER NOT NULL DEFAULT 0"),  # filled from past games by recalculate_points()
 ]
 
-WIN_POINTS = 50   # ranked points a player gets for a win
-LOSS_POINTS = 30  # ranked points a player loses for a loss (points never go below 0)
+WIN_POINTS = 50    # ranked points a player gets for a win
+LOSS_POINTS = 30   # ranked points a player loses for a loss (points never go below 0)
+STREAK_MIN = 2     # wins in a row needed for a win streak
+STREAK_BONUS = 10  # extra points for every win while on a win streak (the STREAK_MIN-th win in a row and later)
+
+
+def win_points(streak_after_win: int) -> int:
+    """Points for a win, given the number of wins in a row including this one."""
+    return WIN_POINTS + (STREAK_BONUS if streak_after_win >= STREAK_MIN else 0)
 
 
 @dataclass
@@ -213,8 +222,8 @@ class Database:
             if column not in existing:
                 self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {column_type}")
                 added.add((table, column))
-        if ("player_stats", "points") in added:
-            self.backfill_points()
+        if ("player_stats", "points") in added or ("player_stats", "streak") in added:
+            self.recalculate_points()
         self.conn.commit()
 
     @staticmethod
@@ -466,25 +475,33 @@ class Database:
 
     def record_result(self, guild_id: int, winners: List[int], losers: List[int],
                       draws: List[int] = ()) -> None:
-        """Counts a finished game. Winners get +WIN_POINTS, losers -LOSS_POINTS (never below 0), draws +0."""
-        changes = ((winners, "wins", f"points + {WIN_POINTS}"),
-                   (losers, "losses", f"MAX(0, points - {LOSS_POINTS})"),
-                   (draws, "draws", "points"))
-        for user_ids, column, points in changes:
-            start_points = WIN_POINTS if column == "wins" else 0
-            for user_id in user_ids:
-                self.conn.execute(
-                    f"INSERT INTO player_stats (guild_id, user_id, {column}, points) VALUES (?, ?, 1, ?) "
-                    f"ON CONFLICT (guild_id, user_id) DO UPDATE SET {column} = {column} + 1, points = {points}",
-                    (guild_id, user_id, start_points),
-                )
+        """Counts a finished game. Winners get +WIN_POINTS (+STREAK_BONUS while on a win streak),
+        losers -LOSS_POINTS (never below 0) and lose their streak, draws change nothing but the draw count."""
+        for user_id in [*winners, *losers, *draws]:
+            self.conn.execute("INSERT OR IGNORE INTO player_stats (guild_id, user_id) VALUES (?, ?)",
+                              (guild_id, user_id))
+        for user_id in winners:
+            # In an UPDATE, "streak" is still the old value, so the streak after this win is streak + 1.
+            self.conn.execute(
+                "UPDATE player_stats SET wins = wins + 1, streak = streak + 1, "
+                "points = points + ? + CASE WHEN streak + 1 >= ? THEN ? ELSE 0 END "
+                "WHERE guild_id = ? AND user_id = ?",
+                (WIN_POINTS, STREAK_MIN, STREAK_BONUS, guild_id, user_id))
+        for user_id in losers:
+            self.conn.execute(
+                "UPDATE player_stats SET losses = losses + 1, streak = 0, points = MAX(0, points - ?) "
+                "WHERE guild_id = ? AND user_id = ?", (LOSS_POINTS, guild_id, user_id))
+        for user_id in draws:
+            self.conn.execute("UPDATE player_stats SET draws = draws + 1 WHERE guild_id = ? AND user_id = ?",
+                              (guild_id, user_id))
         self.conn.commit()
 
-    def backfill_points(self) -> None:
-        """Gives everyone the ranked points they would have had, by replaying all approved games in order.
-        Runs once, when the points column is added. Players whose saved wins/losses don't match the
-        game history (e.g. changed by hand) get max(0, wins * WIN_POINTS - losses * LOSS_POINTS)."""
-        points, wins, losses = {}, {}, {}
+    def recalculate_points(self) -> None:
+        """Gives everyone the ranked points and win streak they should have, by replaying all approved
+        games in order. Runs when the points/streak columns are added and after a game is removed.
+        Players whose saved wins/losses don't match the game history (e.g. changed by hand) get
+        max(0, wins * WIN_POINTS - losses * LOSS_POINTS) and no streak."""
+        points, streak, wins, losses = {}, {}, {}, {}
         lobbies = self.conn.execute(
             "SELECT id, guild_id, winner FROM lobbies WHERE status = 'done' AND winner IN ('A', 'B') ORDER BY id"
         ).fetchall()
@@ -493,37 +510,83 @@ class Database:
                                             "AND team IS NOT NULL", (lobby["id"],)):
                 key = (lobby["guild_id"], player["user_id"])
                 if player["team"] == lobby["winner"]:
-                    points[key] = points.get(key, 0) + WIN_POINTS
+                    streak[key] = streak.get(key, 0) + 1
+                    points[key] = points.get(key, 0) + win_points(streak[key])
                     wins[key] = wins.get(key, 0) + 1
                 else:
+                    streak[key] = 0
                     points[key] = max(0, points.get(key, 0) - LOSS_POINTS)
                     losses[key] = losses.get(key, 0) + 1
         for row in self.conn.execute("SELECT guild_id, user_id, wins, losses FROM player_stats").fetchall():
             key = (row["guild_id"], row["user_id"])
             if (wins.get(key, 0), losses.get(key, 0)) == (row["wins"], row["losses"]):
-                value = points.get(key, 0)
+                values = (points.get(key, 0), streak.get(key, 0))
             else:
-                value = max(0, row["wins"] * WIN_POINTS - row["losses"] * LOSS_POINTS)
-            self.conn.execute("UPDATE player_stats SET points = ? WHERE guild_id = ? AND user_id = ?",
-                              (value, *key))
+                values = (max(0, row["wins"] * WIN_POINTS - row["losses"] * LOSS_POINTS), 0)
+            self.conn.execute("UPDATE player_stats SET points = ?, streak = ? WHERE guild_id = ? AND user_id = ?",
+                              (*values, *key))
+
+    def remove_game(self, lobby_id: int) -> List[tuple]:
+        """Undoes a finished game: winners lose 1 win, losers 1 loss (or everyone 1 draw), the game gets
+        status 'removed' and all points and streaks are recalculated. Returns (name, 'win'/'loss'/'draw')
+        per player. Returns [] if the game is not finished (e.g. already removed)."""
+        lobby = self.get_lobby(lobby_id)
+        if lobby is None or lobby.status != "done":
+            return []
+        changes = []
+        for player in self.lobby_players(lobby_id):
+            if player.team is None:
+                continue
+            if lobby.winner not in ("A", "B"):
+                column, label = "draws", "draw"
+            elif player.team == lobby.winner:
+                column, label = "wins", "win"
+            else:
+                column, label = "losses", "loss"
+            self.conn.execute(f"UPDATE player_stats SET {column} = MAX(0, {column} - 1) "
+                              "WHERE guild_id = ? AND user_id = ?", (lobby.guild_id, player.user_id))
+            changes.append((player.name, label))
+        self.conn.execute("UPDATE lobbies SET status = 'removed' WHERE id = ?", (lobby_id,))
+        self.recalculate_points()
+        self.conn.commit()
+        return changes
+
+    def finished_games(self, guild_id: int, limit: Optional[int] = None) -> List[tuple]:
+        """Approved games, newest first: (lobby_id, winner, {user_id: team}). winner is 'A', 'B' or 'draw'."""
+        query = "SELECT id, winner FROM lobbies WHERE guild_id = ? AND status = 'done' ORDER BY id DESC"
+        if limit:
+            query += f" LIMIT {int(limit)}"
+        games = []
+        for lobby in self.conn.execute(query, (guild_id,)).fetchall():
+            teams = {r["user_id"]: r["team"] for r in self.conn.execute(
+                "SELECT user_id, team FROM lobby_players WHERE lobby_id = ? AND team IS NOT NULL", (lobby["id"],))}
+            games.append((lobby["id"], lobby["winner"], teams))
+        return games
+
+    def player_names(self, guild_id: int) -> dict:
+        """user_id -> the name they used in their latest captains game."""
+        rows = self.conn.execute(
+            "SELECT p.user_id, p.name FROM lobby_players p JOIN lobbies l ON l.id = p.lobby_id "
+            "WHERE l.guild_id = ? ORDER BY l.id", (guild_id,)).fetchall()
+        return {r["user_id"]: r["name"] for r in rows}
 
     def player_stats(self, guild_id: int, user_id: int) -> tuple:
-        """(points, wins, losses, draws) of the user in this server."""
+        """(points, wins, losses, draws, streak) of the user in this server."""
         row = self.conn.execute(
-            "SELECT points, wins, losses, draws FROM player_stats WHERE guild_id = ? AND user_id = ?",
+            "SELECT points, wins, losses, draws, streak FROM player_stats WHERE guild_id = ? AND user_id = ?",
             (guild_id, user_id)
         ).fetchone()
-        return (row["points"], row["wins"], row["losses"], row["draws"]) if row else (0, 0, 0, 0)
+        return (row["points"], row["wins"], row["losses"], row["draws"], row["streak"]) if row else (0, 0, 0, 0, 0)
 
     def stats_leaderboard(self, guild_id: int, limit: int, offset: int = 0) -> List[tuple]:
-        """(user_id, points, wins, losses, draws) for everyone who played, most ranked points first
+        """(user_id, points, wins, losses, draws, streak) for everyone who played, most ranked points first
         (most wins, then fewest losses on a tie)."""
         rows = self.conn.execute(
-            "SELECT user_id, points, wins, losses, draws FROM player_stats WHERE guild_id = ? "
+            "SELECT user_id, points, wins, losses, draws, streak FROM player_stats WHERE guild_id = ? "
             "AND wins + losses + draws > 0 ORDER BY points DESC, wins DESC, losses, user_id LIMIT ? OFFSET ?",
             (guild_id, limit, offset),
         ).fetchall()
-        return [(r["user_id"], r["points"], r["wins"], r["losses"], r["draws"]) for r in rows]
+        return [(r["user_id"], r["points"], r["wins"], r["losses"], r["draws"], r["streak"]) for r in rows]
 
     def stats_player_count(self, guild_id: int) -> int:
         row = self.conn.execute(

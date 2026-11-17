@@ -25,6 +25,10 @@ over, the channel and role are deleted.
 | `/captains` | Anywhere | Everyone |
 | `/stats [member]` | Anywhere | Everyone |
 | `/leaderboard` | Anywhere | Everyone |
+| `/vs player [player2]` | Anywhere | Everyone |
+| `/duo player [player2]` | Anywhere | Everyone |
+| `/duos` | Anywhere | Everyone |
+| `/game remove number` | Anywhere | Referees (`REFEREE_ROLE_ID`) |
 
 Times can be written as `20:00`, `tomorrow 20:00`, `10-10 20:00` or `10-10-2026 20:00`
 (interpreted in the `TIMEZONE` from `.env`). Discord shows them to each member in their own timezone.
@@ -63,13 +67,22 @@ After approval, every player of the winning team gets a win and every player of 
 If nobody won, a captain clicks **Report draw** instead; after the other captain approves, every player gets a draw.
 
 **Ranked points:** a win gives **+50** points, a loss **−30** (points never go below 0), a draw 0.
-`/stats [member]` shows one player's points, wins, losses and draws, `/leaderboard` shows everyone who ever
-played (most points first, 10 per page). Points for games played before points existed are calculated
-once, by replaying the old games in order.
+**Win streaks:** from the 2nd win in a row, every win gives **+10** extra points. A loss ends the streak;
+a draw keeps it. Points and streaks of past games were calculated by replaying the old games in order.
+**Tiers:** 🥉 Bronze (0), 🥈 Silver (100), 🥇 Gold (200), 💠 Platinum (350), 💎 Diamond (550), 👑 Master (800).
+`/stats [member]` shows one player's tier, points, streak, wins, losses and draws, `/leaderboard` shows
+everyone who ever played (most points first, 10 per page) with their tier and 🔥 streak.
+
+**Duos and rivals:** `/vs player [player2]` shows who wins more when two players are on different teams.
+`/duo player [player2]` shows how two players do in the same team. `/duos` lists the best duos by win rate
+(at least 3 games together). Leave `player2` empty to compare with yourself.
 
 **Referees:** members with the `REFEREE_ROLE_ID` role can also approve or deny a captain's report. A referee
 who is not a captain can click **Report win** too: a private message asks which team won. Both captains are
 pinged and one of them (or another referee) must **Approve** it. **Report draw** works the same way.
+`/game remove number` removes a wrongly reported game: the game number is in the title of every game message,
+and the command suggests recent games while you type. After a Yes/No confirmation, the players lose that
+win/loss/draw and all points and streaks are calculated again. (`python remove_game.py` does the same on the server.)
 
 **Team voice channels:** when a `/captains` draft in an event channel completes, each team gets a role and a private voice channel
 (🔴 / 🔵). Players who are in voice are moved automatically. `/event move` moves everyone to their

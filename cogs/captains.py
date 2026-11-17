@@ -11,7 +11,7 @@ from discord.ext import commands
 from cogs.events import truncate_field
 from cogs.fun import LeaderboardView
 from config import REFEREE_ROLE_IDS
-from database import LOSS_POINTS, WIN_POINTS, Database, Lobby, LobbyPlayer
+from database import LOSS_POINTS, STREAK_BONUS, STREAK_MIN, WIN_POINTS, Database, Lobby, LobbyPlayer
 
 log = logging.getLogger(__name__)
 
@@ -232,7 +232,7 @@ def build_game_embed(lobby: Lobby, players: List[LobbyPlayer]) -> discord.Embed:
             embed.set_footer(text="A coin flip decides which captain picks first.")
         return embed
 
-    embed = discord.Embed(title="⚔️ Captains draft", color=discord.Color.red())
+    embed = discord.Embed(title=f"⚔️ Captains draft · Game {lobby.id}", color=discord.Color.red())
     for team in ("A", "B"):
         crown = "🏆 " if lobby.status == "done" and lobby.winner == team else ""
         # Number each team on its own: the captain is 1, then 2, 3, 4 …
@@ -272,10 +272,13 @@ def build_game_embed(lobby: Lobby, players: List[LobbyPlayer]) -> discord.Embed:
             embed.set_footer(text="Everyone got +1 draw and 0 points. See /leaderboard")
         else:
             embed.description = f"🏆 **{team_name(lobby, players, lobby.winner)}** won!"
-            embed.set_footer(text=f"Winners got +{WIN_POINTS} points, losers -{LOSS_POINTS} points. "
-                                  "See /leaderboard")
+            embed.set_footer(text=f"Winners got +{WIN_POINTS} points (+{STREAK_BONUS} on a win streak), "
+                                  f"losers -{LOSS_POINTS} points. See /leaderboard")
         if lobby.reported_by and lobby.team_of_captain(lobby.reported_by) is None:
             embed.description += f"\nReported by referee <@{lobby.reported_by}>."
+    elif lobby.status == "removed":
+        embed.color = discord.Color.dark_grey()
+        embed.description = "🗑️ A referee removed this game. It does not count."
     else:
         embed.color = discord.Color.dark_grey()
         embed.description = "This game was cancelled."
@@ -356,18 +359,154 @@ def fit(text: str, width: int) -> str:
     return text + " " * (width - sum(map(char_width, text)))
 
 
+# Rank tiers by ranked points, highest first: (minimum points, name, emoji)
+TIERS = [
+    (800, "Master", "👑"),
+    (550, "Diamond", "💎"),
+    (350, "Platinum", "💠"),
+    (200, "Gold", "🥇"),
+    (100, "Silver", "🥈"),
+    (0, "Bronze", "🥉"),
+]
+
+
+def tier_of(points: int) -> tuple:
+    """(name, emoji) of the tier for these points."""
+    return next((name, emoji) for minimum, name, emoji in TIERS if points >= minimum)
+
+
+def next_tier(points: int) -> Optional[tuple]:
+    """(points still needed, name, emoji) of the next tier, or None at the top tier."""
+    higher = [(minimum - points, name, emoji) for minimum, name, emoji in TIERS if minimum > points]
+    return higher[-1] if higher else None
+
+
+def streak_text(streak: int) -> str:
+    """'🔥3' while on a win streak, else ''."""
+    return f"🔥{streak}" if streak >= STREAK_MIN else ""
+
+
 def build_leaderboard_embed(rows: list, offset: int, page: int, pages: int) -> discord.Embed:
-    """rows: (name, points, wins, losses, draws) for one page. Plain names, so nobody gets pinged.
-    One row per player in a small monospace tag, so the columns line up. A row is only 32 characters,
-    so it does not wrap on a phone."""
-    lines = [f"` #  {fit('Player', NAME_WIDTH)}  Pts  W  L  D`"]
-    for rank, (name, points, wins, losses, draws) in enumerate(rows, start=offset + 1):
-        lines.append(f"`{rank:>2}  {fit(name, NAME_WIDTH)} {points:>4} {wins:>2} {losses:>2} {draws:>2}`")
+    """rows: (name, points, wins, losses, draws, streak) for one page. Plain names, so nobody gets pinged.
+    One row per player in a small monospace tag, so the columns line up. The tier emoji and win streak
+    come after the tag (emoji have no fixed width). A row is short enough to not wrap on a phone."""
+    lines = [f"` #  {fit('Player', NAME_WIDTH)}  Pts  W  L`"]
+    for rank, (name, points, wins, losses, draws, streak) in enumerate(rows, start=offset + 1):
+        extra = " ".join(part for part in (tier_of(points)[1], streak_text(streak)) if part)
+        lines.append(f"`{rank:>2}  {fit(name, NAME_WIDTH)} {points:>4} {wins:>2} {losses:>2}` {extra}")
     embed = discord.Embed(title="🏆 Captains leaderboard", description="\n".join(lines),
                           color=discord.Color.gold())
-    embed.set_footer(text=f"Page {page + 1} of {pages} · Pts = points (win +{WIN_POINTS}, loss -{LOSS_POINTS}) · "
-                          "W = wins, L = losses, D = draws")
+    tiers = " · ".join(f"{emoji} {minimum}" for minimum, name, emoji in reversed(TIERS))
+    embed.set_footer(text=f"Page {page + 1} of {pages} · Pts = points · W = wins · L = losses · "
+                          f"🔥 = wins in a row (+{STREAK_BONUS} per win)\nTiers: {tiers}")
     return embed
+
+
+# --- duos and head-to-head ------------------------------------------------------
+
+DUO_MIN_GAMES = 3  # games together needed to show up in /duos
+DUO_WIDTH = 17     # /duos name column; a whole row is 32 characters, so it fits on a phone
+
+VS_NEVER = [
+    "{a} and {b} never played against each other. Time for a fight! ⚔️",
+    "No games against each other yet. Who is better? Nobody knows! 🤔",
+    "{a} vs {b}? This fight never happened. Make it happen! 🥊",
+]
+VS_TIE = [
+    "Exactly the same! Nobody is the boss here. 🤝",
+    "Equal! The next game decides who is the boss. 👀",
+    "Same number of wins. Very close fight! ⚖️",
+]
+VS_LEAD = [
+    "{leader} is the boss here! 👑",
+    "{loser} needs revenge! 😤",
+    "{leader} wins more. {loser}, train more! 🏋️",
+    "{leader} is happy. {loser} is not. 😅",
+    "Next game, {loser}! You can do it! 💪",
+]
+VS_CRUSH = [
+    "{loser} never won against {leader}. Ouch! 💀",
+    "{leader} owns {loser}! 😎",
+    "{loser}, maybe play on the same team as {leader}… 😂",
+]
+
+DUO_NEVER = [
+    "{a} and {b} never played in the same team. Try it! 🤝",
+    "No games together yet. Maybe you are a dream team? Find out! ✨",
+]
+DUO_GREAT = [
+    "Dream team! 🔥",
+    "Best friends, best players! 💪",
+    "Together you are very strong! 🦾",
+    "The other team should be scared of you two! 😱",
+]
+DUO_OK = [
+    "Not bad together! 👍",
+    "A good team. Keep going! 🙂",
+    "Sometimes you win, sometimes you lose. Normal! 🤷",
+]
+DUO_BAD = [
+    "Maybe play on different teams… 😅",
+    "This duo needs more training! 🏋️",
+    "Together you lose a lot. But you have fun, right? 😂",
+    "Bad luck or bad teamwork? 🤔",
+]
+
+
+def head_to_head(games: list, a: int, b: int) -> tuple:
+    """(wins of a, wins of b, draws) in games where a and b were on different teams."""
+    a_wins = b_wins = draws = 0
+    for _, winner, teams in games:
+        if a not in teams or b not in teams or teams[a] == teams[b]:
+            continue
+        if winner == teams[a]:
+            a_wins += 1
+        elif winner == teams[b]:
+            b_wins += 1
+        else:
+            draws += 1
+    return a_wins, b_wins, draws
+
+
+def duo_records(games: list) -> dict:
+    """(user_a, user_b) with user_a < user_b -> [wins, losses, draws] when they were on the same team."""
+    records = {}
+    for _, winner, teams in games:
+        for team in ("A", "B"):
+            members = sorted(user_id for user_id, t in teams.items() if t == team)
+            outcome = 0 if winner == team else 2 if winner not in ("A", "B") else 1
+            for i, first in enumerate(members):
+                for second in members[i + 1:]:
+                    records.setdefault((first, second), [0, 0, 0])[outcome] += 1
+    return records
+
+
+def short_player(name: str) -> str:
+    """'Danek / Danila / King RU' -> 'Danek': the first part of a 'name / nickname' name."""
+    return name.split(" / ")[0].strip() or name
+
+
+class RemoveGameView(discord.ui.View):
+    """Private Yes / No buttons after /game remove."""
+
+    def __init__(self, cog: "Captains", lobby_id: int):
+        super().__init__(timeout=120)
+        self.cog = cog
+        self.lobby_id = lobby_id
+
+    @discord.ui.button(label="Yes, remove it", emoji="🗑️", style=discord.ButtonStyle.danger)
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.cog.confirm_remove(interaction, self.lobby_id)
+
+    @discord.ui.button(label="No, keep it", style=discord.ButtonStyle.secondary)
+    async def keep(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(content="OK, nothing changed. The game stays.", embed=None, view=None)
+
+
+def describe_game(lobby: Lobby, players: List[LobbyPlayer]) -> str:
+    """'Team Bob vs Team Ann → Team Bob won' for lists and confirmations."""
+    result = "draw" if lobby.winner == DRAW else f"{team_name(lobby, players, lobby.winner)} won"
+    return f"{team_name(lobby, players, 'A')} vs {team_name(lobby, players, 'B')} → {result}"
 
 
 class Captains(commands.Cog):
@@ -688,15 +827,161 @@ class Captains(commands.Cog):
     @app_commands.describe(member="The player to check (empty = you)")
     async def stats(self, interaction: discord.Interaction, member: Optional[discord.Member] = None):
         member = member or interaction.user
-        points, wins, losses, draws = self.db.player_stats(interaction.guild_id, member.id)
+        points, wins, losses, draws, streak = self.db.player_stats(interaction.guild_id, member.id)
         games = wins + losses + draws
         if games == 0:
             text = f"{member.mention} has not played a captains game yet."
         else:
             rate = round(100 * wins / games)
-            text = (f"📊 {member.mention}: **{points}** points · **{wins}** wins · **{losses}** losses · "
-                    f"**{draws}** draws · {games} games · {rate}% won")
+            tier, emoji = tier_of(points)
+            text = f"📊 {member.mention}\n{emoji} **{tier}** · **{points}** points"
+            upcoming = next_tier(points)
+            if upcoming:
+                needed, next_name, next_emoji = upcoming
+                text += f" · {needed} more for {next_emoji} {next_name}"
+            text += (f"\n**{wins}** wins · **{losses}** losses · **{draws}** draws · "
+                     f"{games} games · {rate}% won")
+            if streak >= STREAK_MIN:
+                text += f"\n🔥 **{streak} wins in a row!** Every win now gives +{STREAK_BONUS} extra points."
+            elif streak == STREAK_MIN - 1:
+                text += f"\n🔥 Win the next game for a win streak (+{STREAK_BONUS} extra points per win)!"
         await interaction.response.send_message(text, allowed_mentions=discord.AllowedMentions.none())
+
+    def display_name(self, guild: discord.Guild, user_id: int, saved: dict) -> str:
+        member = guild.get_member(user_id)
+        return member.display_name if member else saved.get(user_id, "Unknown player")
+
+    @app_commands.guild_only()
+    @app_commands.command(name="vs", description="Who wins more when two players are on different teams?")
+    @app_commands.describe(player="The player to compare with", player2="The other player (empty = you)")
+    async def vs(self, interaction: discord.Interaction, player: discord.Member,
+                 player2: Optional[discord.Member] = None):
+        first = player2 or interaction.user
+        if first.id == player.id:
+            await interaction.response.send_message("Pick two different players. 🙂", ephemeral=True)
+            return
+        a_wins, b_wins, draws = head_to_head(self.db.finished_games(interaction.guild_id), first.id, player.id)
+        a, b = safe(first.display_name), safe(player.display_name)
+        text = f"⚔️ **{a}** vs **{b}**\n"
+        if a_wins + b_wins + draws == 0:
+            text += random.choice(VS_NEVER).format(a=a, b=b)
+        else:
+            text += f"**{a}**: {a_wins} wins · **{b}**: {b_wins} wins · Draws: {draws}\n"
+            if a_wins == b_wins:
+                text += random.choice(VS_TIE)
+            else:
+                leader, loser = (a, b) if a_wins > b_wins else (b, a)
+                crushed = min(a_wins, b_wins) == 0 and max(a_wins, b_wins) >= 3
+                text += random.choice(VS_CRUSH if crushed else VS_LEAD).format(leader=leader, loser=loser)
+        await interaction.response.send_message(text, allowed_mentions=discord.AllowedMentions.none())
+
+    @app_commands.guild_only()
+    @app_commands.command(name="duo", description="How good are two players together in the same team?")
+    @app_commands.describe(player="Your teammate", player2="The other player (empty = you)")
+    async def duo(self, interaction: discord.Interaction, player: discord.Member,
+                  player2: Optional[discord.Member] = None):
+        first = player2 or interaction.user
+        if first.id == player.id:
+            await interaction.response.send_message("Pick two different players. 🙂", ephemeral=True)
+            return
+        records = duo_records(self.db.finished_games(interaction.guild_id))
+        wins, losses, draws = records.get(tuple(sorted((first.id, player.id))), (0, 0, 0))
+        games = wins + losses + draws
+        a, b = safe(first.display_name), safe(player.display_name)
+        text = f"🤝 **{a}** + **{b}**\n"
+        if games == 0:
+            text += random.choice(DUO_NEVER).format(a=a, b=b)
+        else:
+            rate = round(100 * wins / games)
+            text += f"{games} games together · **{wins}** wins · **{losses}** losses · **{draws}** draws · {rate}% won\n"
+            text += random.choice(DUO_GREAT if rate >= 60 else DUO_OK if rate >= 40 else DUO_BAD)
+        await interaction.response.send_message(text, allowed_mentions=discord.AllowedMentions.none())
+
+    @app_commands.guild_only()
+    @app_commands.command(name="duos", description="The best duos: players who win the most together")
+    async def duos(self, interaction: discord.Interaction):
+        records = duo_records(self.db.finished_games(interaction.guild_id))
+        ranked = []
+        for pair, (wins, losses, draws) in records.items():
+            games = wins + losses + draws
+            if games >= DUO_MIN_GAMES:
+                ranked.append((wins / games, wins, games, pair))
+        if not ranked:
+            await interaction.response.send_message(
+                f"No duos yet. Two players need at least {DUO_MIN_GAMES} games in the same team. ⚔️", ephemeral=True)
+            return
+        ranked.sort(key=lambda r: (-r[0], -r[1], -r[2]))
+        saved = self.db.player_names(interaction.guild_id)
+        lines = [f"` #  {fit('Duo', DUO_WIDTH)}  W/G   Win`"]
+        for rank, (rate, wins, games, (first, second)) in enumerate(ranked[:10], start=1):
+            names = [fit(short_player(self.display_name(interaction.guild, user_id, saved)), 8).rstrip()
+                     for user_id in (first, second)]
+            lines.append(f"`{rank:>2}  {fit(' + '.join(names), DUO_WIDTH)} {wins:>2}/{games:<2} {round(100 * rate):>3}%`")
+        embed = discord.Embed(title="🤝 Best duos", description="\n".join(lines), color=discord.Color.gold())
+        embed.set_footer(text=f"W/G = wins / games together · Only duos with {DUO_MIN_GAMES}+ games together · "
+                              "See one duo with /duo")
+        await interaction.response.send_message(embed=embed)
+
+    # --- /game remove (referees only) ------------------------------------------
+
+    game = app_commands.Group(name="game", description="Manage captains games (referees only)", guild_only=True)
+
+    @game.command(name="remove", description="Remove a wrong game from the stats (referees only)")
+    @app_commands.describe(number="The game number. You see it in the title of the game message.")
+    async def game_remove(self, interaction: discord.Interaction, number: int):
+        if not is_referee(interaction):
+            await interaction.response.send_message("Only referees can remove games.", ephemeral=True)
+            return
+        lobby = self.db.get_lobby(number)
+        if lobby is None or lobby.guild_id != interaction.guild_id or lobby.status != "done":
+            await interaction.response.send_message(
+                f"Game {number} is not a finished game. Only finished games can be removed.", ephemeral=True)
+            return
+        players = self.db.lobby_players(lobby.id)
+        embed = discord.Embed(title=f"🗑️ Remove game {lobby.id}?", description=describe_game(lobby, players),
+                              color=discord.Color.red())
+        for team in ("A", "B"):
+            change = "-1 draw" if lobby.winner == DRAW else "-1 win" if lobby.winner == team else "-1 loss"
+            names = "\n".join(safe(p.name) for p in team_members(players, team))
+            embed.add_field(name=f"{TEAM_EMOJI[team]} {team_name(lobby, players, team)}: {change}"[:256],
+                            value=truncate_field(names or "-"), inline=True)
+        embed.set_footer(text="Everyone's points and win streaks are calculated again without this game.")
+        await interaction.response.send_message("Are you sure?", embed=embed, view=RemoveGameView(self, lobby.id),
+                                                ephemeral=True)
+
+    @game_remove.autocomplete("number")
+    async def game_number_autocomplete(self, interaction: discord.Interaction,
+                                       current: str) -> List[app_commands.Choice[int]]:
+        choices = []
+        for lobby_id, _, _ in self.db.finished_games(interaction.guild_id, limit=50):
+            if current and not str(lobby_id).startswith(current.strip()):
+                continue
+            lobby = self.db.get_lobby(lobby_id)
+            label = f"Game {lobby_id}: {describe_game(lobby, self.db.lobby_players(lobby_id))}"
+            choices.append(app_commands.Choice(name=label[:100], value=lobby_id))
+            if len(choices) == 25:
+                break
+        return choices
+
+    async def confirm_remove(self, interaction: discord.Interaction, lobby_id: int) -> None:
+        if not is_referee(interaction):
+            await interaction.response.send_message("Only referees can remove games.", ephemeral=True)
+            return
+        if not self.db.remove_game(lobby_id):
+            await interaction.response.edit_message(
+                content=f"Game {lobby_id} was already removed. Nothing changed.", embed=None, view=None)
+            return
+        await interaction.response.edit_message(
+            content=f"✅ Game {lobby_id} is removed. Points and win streaks are calculated again.",
+            embed=None, view=None)
+        lobby = self.db.get_lobby(lobby_id)
+        channel = self.bot.get_channel(lobby.channel_id)
+        if channel is not None and lobby.draft_message_id:
+            try:
+                await channel.get_partial_message(lobby.draft_message_id).edit(
+                    embed=build_game_embed(lobby, self.db.lobby_players(lobby_id)), view=None)
+            except discord.HTTPException as e:
+                log.warning("Could not update game message of removed lobby %s: %s", lobby_id, e)
 
     @app_commands.guild_only()
     @app_commands.command(name="leaderboard", description="See the ranking of all captains players (by ranked points)")
