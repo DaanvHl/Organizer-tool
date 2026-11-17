@@ -263,16 +263,8 @@ def build_game_embed(lobby: Lobby, players: List[LobbyPlayer]) -> discord.Embed:
             embed.description += "\nA referee can also report the result."
     elif lobby.status == "reported":
         embed.color = discord.Color.gold()
-        who = f"<@{lobby.reported_by}>"
-        if lobby.team_of_captain(lobby.reported_by) is None:
-            who = f"Referee {who}"
-        if lobby.winner == DRAW:
-            claim = f"🤝 {who} says the game was a **draw**."
-        else:
-            claim = f"🏆 {who} says **{team_name(lobby, players, lobby.winner)}** won."
-        embed.description = f"{claim}\n{mention_list(confirmers(lobby))}, is this true? Click **Approve** or **Deny**."
-        if REFEREE_ROLE_IDS:
-            embed.set_footer(text="A referee can also approve or deny.")
+        embed.description = (f"{claim_text(lobby, players)}\n"
+                             f"⏳ Waiting for {mention_list(confirmers(lobby))} to approve. See the message below.")
     elif lobby.status == "done":
         embed.color = discord.Color.gold()
         if lobby.winner == DRAW:
@@ -312,11 +304,30 @@ def build_game_view(lobby: Lobby, players: List[LobbyPlayer]) -> Optional[discor
     elif lobby.status == "playing":
         view.add_item(LobbyButton("report", lobby.id))
         view.add_item(LobbyButton("draw", lobby.id))
-    elif lobby.status == "reported":
-        view.add_item(LobbyButton("approve", lobby.id))
-        view.add_item(LobbyButton("deny", lobby.id))
-    else:
+    else:  # reported: Approve / Deny are on a separate message, see build_approval_view
         return None
+    return view
+
+
+def result_text(lobby: Lobby, players: List[LobbyPlayer]) -> str:
+    """'the game was a **draw**' or '**Team X** won'."""
+    if lobby.winner == DRAW:
+        return "the game was a **draw**"
+    return f"**{team_name(lobby, players, lobby.winner)}** won"
+
+
+def claim_text(lobby: Lobby, players: List[LobbyPlayer]) -> str:
+    """What the reporter said, e.g. '🏆 @Bob says **Team Bob** won.'"""
+    who = f"<@{lobby.reported_by}>"
+    if lobby.team_of_captain(lobby.reported_by) is None:
+        who = f"Referee {who}"
+    return f"{'🤝' if lobby.winner == DRAW else '🏆'} {who} says {result_text(lobby, players)}."
+
+
+def build_approval_view(lobby: Lobby) -> discord.ui.View:
+    view = discord.ui.View(timeout=None)
+    view.add_item(LobbyButton("approve", lobby.id))
+    view.add_item(LobbyButton("deny", lobby.id))
     return view
 
 
@@ -612,10 +623,25 @@ class Captains(commands.Cog):
         await self.ping_confirmers(interaction, lobby.id)
 
     async def ping_confirmers(self, interaction: discord.Interaction, lobby_id: int) -> None:
-        targets = confirmers(self.db.get_lobby(lobby_id))
+        """Posts a new message with Approve / Deny and pings who must confirm the result."""
+        lobby = self.db.get_lobby(lobby_id)
+        players = self.db.lobby_players(lobby.id)
+        targets = confirmers(lobby)
+        text = (f"{claim_text(lobby, players)}\n"
+                f"{mention_list(targets)}, is this true? Click **Approve** or **Deny**.")
+        if REFEREE_ROLE_IDS:
+            text += "\n-# A referee can also approve or deny."
         await interaction.followup.send(
-            f"{mention_list(targets)}, please approve or deny the result on the message above.",
+            text, view=build_approval_view(lobby),
             allowed_mentions=discord.AllowedMentions(users=[discord.Object(t) for t in targets]))
+
+    async def show_decision(self, interaction: discord.Interaction, lobby: Lobby, text: str) -> None:
+        """After Approve / Deny: the approval message says who decided, and the game message is updated."""
+        if interaction.message is not None and interaction.message.id == lobby.draft_message_id:
+            return await self.show_game(interaction, lobby)  # buttons on the game message (games from before)
+        await interaction.response.edit_message(content=text, view=None,
+                                                allowed_mentions=discord.AllowedMentions.none())
+        await self.refresh_game_message(interaction, lobby.id)
 
     async def on_approve(self, interaction: discord.Interaction, lobby: Lobby, players: List[LobbyPlayer]):
         if lobby.status != "reported":
@@ -628,7 +654,8 @@ class Captains(commands.Cog):
             return await self.refuse(interaction, "Only the other captain or a referee can approve.")
 
         self.finish_game(interaction, lobby, players, lobby.winner)
-        await self.show_game(interaction, lobby)
+        await self.show_decision(interaction, lobby, f"{claim_text(lobby, players)}\n"
+                                                     f"✅ {interaction.user.mention} approved it.")
 
     async def on_deny(self, interaction: discord.Interaction, lobby: Lobby, players: List[LobbyPlayer]):
         if lobby.status != "reported":
@@ -636,8 +663,10 @@ class Captains(commands.Cog):
         if (interaction.user.id not in (lobby.captain_a, lobby.captain_b)
                 and not is_admin(interaction) and not is_referee(interaction)):
             return await self.refuse(interaction, "Only the captains or a referee can deny.")
+        claim = claim_text(lobby, players)
         self.db.update_lobby(lobby.id, status="playing", winner=None, reported_by=None)
-        await self.show_game(interaction, lobby)
+        await self.show_decision(interaction, lobby, f"~~{claim}~~\n❌ {interaction.user.mention} denied it. "
+                                                     "The game goes on. Report again when it is done.")
 
     # --- commands -----------------------------------------------------------
 
