@@ -41,4 +41,10 @@ WHEELCHAIR_USER_IDS = {
     int(part) for part in os.getenv("WHEELCHAIR_USER_IDS", "").replace(" ", ",").split(",") if part.strip()
 }
 
-DATABASE_PATH =os.getenv("DATABASE_PATH", "events.db")
+# Role(s) that can report and approve captains results without being a captain (a "referee").
+# Separate multiple role IDs with commas (right-click role -> Copy Role ID).
+REFEREE_ROLE_IDS = {
+    int(part) for part in os.getenv("REFEREE_ROLE_ID", "").replace(" ", ",").split(",") if part.strip()
+}
+
+DATABASE_PATH = os.getenv("DATABASE_PATH", "events.db")

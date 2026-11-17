@@ -61,8 +61,15 @@ After the game, the winning captain clicks **Report win**. The other captain mus
 (or **Deny**, then the game goes on and the real winner can report again). Admins can also approve.
 After approval, every player of the winning team gets a win and every player of the losing team a loss.
 If nobody won, a captain clicks **Report draw** instead; after the other captain approves, every player gets a draw.
-`/stats [member]` shows one player's wins, losses and draws, `/leaderboard` shows everyone who ever played
-(most wins first, 10 per page).
+
+**Ranked points:** a win gives **+50** points, a loss **−30** (points never go below 0), a draw 0.
+`/stats [member]` shows one player's points, wins, losses and draws, `/leaderboard` shows everyone who ever
+played (most points first, 10 per page). Points for games played before points existed are calculated
+once, by replaying the old games in order.
+
+**Referees:** members with the `REFEREE_ROLE_ID` role can also approve or deny a captain's report. A referee
+who is not a captain can click **Report win** too: a private message asks which team won, and the result
+counts right away (no approval needed). **Report draw** by such a referee also counts right away.
 
 **Team voice channels:** when a `/captains` draft in an event channel completes, each team gets a role and a private voice channel
 (🔴 / 🔵). Players who are in voice are moved automatically. `/event move` moves everyone to their

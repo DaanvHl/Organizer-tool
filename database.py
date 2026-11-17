@@ -75,13 +75,14 @@ CREATE TABLE IF NOT EXISTS lobby_players (
     PRIMARY KEY (lobby_id, user_id)
 );
 
--- Wins, losses and draws from approved /captains games
+-- Wins, losses, draws and ranked points from approved /captains games
 CREATE TABLE IF NOT EXISTS player_stats (
     guild_id INTEGER NOT NULL,
     user_id  INTEGER NOT NULL,
     wins     INTEGER NOT NULL DEFAULT 0,
     losses   INTEGER NOT NULL DEFAULT 0,
     draws    INTEGER NOT NULL DEFAULT 0,
+    points   INTEGER NOT NULL DEFAULT 0,  -- ranked points: +WIN_POINTS per win, -LOSS_POINTS per loss, never below 0
     PRIMARY KEY (guild_id, user_id)
 );
 
@@ -103,7 +104,11 @@ MIGRATIONS = [
     ("events", "autoclosed", "INTEGER NOT NULL DEFAULT 0"),  # sign-ups were closed at start time
     ("lobbies", "draft_type", "TEXT NOT NULL DEFAULT 'snake'"),  # 'snake' or 'normal'
     ("player_stats", "draws", "INTEGER NOT NULL DEFAULT 0"),
+    ("player_stats", "points", "INTEGER NOT NULL DEFAULT 0"),  # filled from past games by backfill_points()
 ]
+
+WIN_POINTS = 50   # ranked points a player gets for a win
+LOSS_POINTS = 30  # ranked points a player loses for a loss (points never go below 0)
 
 
 @dataclass
@@ -202,10 +207,14 @@ class Database:
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA foreign_keys = ON")
         self.conn.executescript(SCHEMA)
+        added = set()
         for table, column, column_type in MIGRATIONS:
             existing = {r["name"] for r in self.conn.execute(f"PRAGMA table_info({table})")}
             if column not in existing:
                 self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {column_type}")
+                added.add((table, column))
+        if ("player_stats", "points") in added:
+            self.backfill_points()
         self.conn.commit()
 
     @staticmethod
@@ -453,35 +462,68 @@ class Database:
         )
         self.conn.commit()
 
-    # --- wins, losses and draws ---------------------------------------------
+    # --- wins, losses, draws and ranked points ---------------------------------------------
 
     def record_result(self, guild_id: int, winners: List[int], losers: List[int],
                       draws: List[int] = ()) -> None:
-        for user_ids, column in ((winners, "wins"), (losers, "losses"), (draws, "draws")):
+        """Counts a finished game. Winners get +WIN_POINTS, losers -LOSS_POINTS (never below 0), draws +0."""
+        changes = ((winners, "wins", f"points + {WIN_POINTS}"),
+                   (losers, "losses", f"MAX(0, points - {LOSS_POINTS})"),
+                   (draws, "draws", "points"))
+        for user_ids, column, points in changes:
+            start_points = WIN_POINTS if column == "wins" else 0
             for user_id in user_ids:
                 self.conn.execute(
-                    f"INSERT INTO player_stats (guild_id, user_id, {column}) VALUES (?, ?, 1) "
-                    f"ON CONFLICT (guild_id, user_id) DO UPDATE SET {column} = {column} + 1",
-                    (guild_id, user_id),
+                    f"INSERT INTO player_stats (guild_id, user_id, {column}, points) VALUES (?, ?, 1, ?) "
+                    f"ON CONFLICT (guild_id, user_id) DO UPDATE SET {column} = {column} + 1, points = {points}",
+                    (guild_id, user_id, start_points),
                 )
         self.conn.commit()
 
+    def backfill_points(self) -> None:
+        """Gives everyone the ranked points they would have had, by replaying all approved games in order.
+        Runs once, when the points column is added. Players whose saved wins/losses don't match the
+        game history (e.g. changed by hand) get max(0, wins * WIN_POINTS - losses * LOSS_POINTS)."""
+        points, wins, losses = {}, {}, {}
+        lobbies = self.conn.execute(
+            "SELECT id, guild_id, winner FROM lobbies WHERE status = 'done' AND winner IN ('A', 'B') ORDER BY id"
+        ).fetchall()
+        for lobby in lobbies:
+            for player in self.conn.execute("SELECT user_id, team FROM lobby_players WHERE lobby_id = ? "
+                                            "AND team IS NOT NULL", (lobby["id"],)):
+                key = (lobby["guild_id"], player["user_id"])
+                if player["team"] == lobby["winner"]:
+                    points[key] = points.get(key, 0) + WIN_POINTS
+                    wins[key] = wins.get(key, 0) + 1
+                else:
+                    points[key] = max(0, points.get(key, 0) - LOSS_POINTS)
+                    losses[key] = losses.get(key, 0) + 1
+        for row in self.conn.execute("SELECT guild_id, user_id, wins, losses FROM player_stats").fetchall():
+            key = (row["guild_id"], row["user_id"])
+            if (wins.get(key, 0), losses.get(key, 0)) == (row["wins"], row["losses"]):
+                value = points.get(key, 0)
+            else:
+                value = max(0, row["wins"] * WIN_POINTS - row["losses"] * LOSS_POINTS)
+            self.conn.execute("UPDATE player_stats SET points = ? WHERE guild_id = ? AND user_id = ?",
+                              (value, *key))
+
     def player_stats(self, guild_id: int, user_id: int) -> tuple:
-        """(wins, losses, draws) of the user in this server."""
+        """(points, wins, losses, draws) of the user in this server."""
         row = self.conn.execute(
-            "SELECT wins, losses, draws FROM player_stats WHERE guild_id = ? AND user_id = ?", (guild_id, user_id)
+            "SELECT points, wins, losses, draws FROM player_stats WHERE guild_id = ? AND user_id = ?",
+            (guild_id, user_id)
         ).fetchone()
-        return (row["wins"], row["losses"], row["draws"]) if row else (0, 0, 0)
+        return (row["points"], row["wins"], row["losses"], row["draws"]) if row else (0, 0, 0, 0)
 
     def stats_leaderboard(self, guild_id: int, limit: int, offset: int = 0) -> List[tuple]:
-        """(user_id, wins, losses, draws) for everyone who played, most wins first
-        (fewest losses, then most draws on a tie)."""
+        """(user_id, points, wins, losses, draws) for everyone who played, most ranked points first
+        (most wins, then fewest losses on a tie)."""
         rows = self.conn.execute(
-            "SELECT user_id, wins, losses, draws FROM player_stats WHERE guild_id = ? "
-            "AND wins + losses + draws > 0 ORDER BY wins DESC, losses, draws DESC, user_id LIMIT ? OFFSET ?",
+            "SELECT user_id, points, wins, losses, draws FROM player_stats WHERE guild_id = ? "
+            "AND wins + losses + draws > 0 ORDER BY points DESC, wins DESC, losses, user_id LIMIT ? OFFSET ?",
             (guild_id, limit, offset),
         ).fetchall()
-        return [(r["user_id"], r["wins"], r["losses"], r["draws"]) for r in rows]
+        return [(r["user_id"], r["points"], r["wins"], r["losses"], r["draws"]) for r in rows]
 
     def stats_player_count(self, guild_id: int) -> int:
         row = self.conn.execute(
