@@ -7,21 +7,20 @@ MAPS = {
         "Short Bridge",
     ],
     "3v3": [
-        "Boombox", "Cross", "Duality", "Garder", "Sandal",
-        "Sandbox", "Station", "Valley", "Zone", "Magadan",
-        "Short Bridge",
+        "Valley", "Zone", "Garder", "Sandal", "Station",
+        "Cross", "Pass", "Atra", "Sandbox", "Small Bridge",
     ],
     "4v4": [
         "Sandbox", "Sandal", "Pass", "Farm", "Boombox", "Magadan",
         "Valley", "Short Bridge",
     ],
     "5v5": [
-        "Cross", "Fort Knox", "Garder", "Sandal",
-        "Station", "Valley", "Zone", "Pass",
+        "Siege", "Gubakha", "Pass", "Iran", "Sandal",
+        "Red Alert", "Polygon", "Molotov", "Station",
     ],
     "6v6": [
-        "Sandal", "Garder", "Zone", "Fort Knox", "Iran",
-        "Cross", "Forest", "Red Alert", "Courage",
+        "Red Alert", "Kungur", "Barda", "Gubakha", "Parma", "Solikamsk",
+        "Forest", "Tribute", "Siege", "Future", "Cologne",
     ],
     "7v7": [
         "Station", "Red Alert", "Fort Knox",
