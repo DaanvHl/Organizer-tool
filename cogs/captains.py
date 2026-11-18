@@ -586,6 +586,44 @@ DUO_BAD = [
 ]
 
 
+def win_bar(a_wins: int, b_wins: int, length: int = 10) -> str:
+    """🟥🟥🟥🟥🟥🟥🟥🟥🟦🟦: red = share of wins of the first player, blue = the second."""
+    red = round(length * a_wins / (a_wins + b_wins))
+    return "🟥" * red + "🟦" * (length - red)
+
+
+def build_vs_embed(first: discord.Member, second: discord.Member, a_wins: int, b_wins: int,
+                   draws: int) -> discord.Embed:
+    """The /vs card: wins of each player, a bar, and a joke."""
+    a, b = safe(short_player(first.display_name)), safe(short_player(second.display_name))
+    games = a_wins + b_wins + draws
+    embed = discord.Embed(title=f"⚔️ {a} vs {b}", color=discord.Color.red())
+    if games == 0:
+        embed.color = discord.Color.light_grey()
+        embed.description = random.choice(VS_NEVER).format(a=f"**{a}**", b=f"**{b}**")
+        return embed
+
+    leader = first if a_wins > b_wins else second if b_wins > a_wins else None
+    for member, name, wins, emoji in ((first, a, a_wins, "🔴"), (second, b, b_wins, "🔵")):
+        crown = " 👑" if member == leader else ""
+        embed.add_field(name=f"{emoji} {name}{crown}"[:256],
+                        value=f"**{wins}** win{'' if wins == 1 else 's'}\n{round(100 * wins / games)}%", inline=True)
+    embed.add_field(name="🤝 Draws", value=f"**{draws}**", inline=True)
+
+    lines = [win_bar(a_wins, b_wins)] if a_wins + b_wins else []
+    if leader is None:
+        lines.append(random.choice(VS_TIE))
+    else:
+        top, low = (a, b) if leader == first else (b, a)
+        crushed = min(a_wins, b_wins) == 0 and max(a_wins, b_wins) >= 3
+        lines.append(random.choice(VS_CRUSH if crushed else VS_LEAD).format(leader=f"**{top}**", loser=f"**{low}**"))
+        embed.color = discord.Color.red() if leader == first else discord.Color.blue()
+        embed.set_thumbnail(url=leader.display_avatar.url)
+    embed.description = "\n".join(lines)
+    embed.set_footer(text=f"{games} game{'' if games == 1 else 's'} on different teams")
+    return embed
+
+
 def head_to_head(games: list, a: int, b: int) -> tuple:
     """(wins of a, wins of b, draws) in games where a and b were on different teams."""
     a_wins = b_wins = draws = 0
@@ -1160,19 +1198,7 @@ class Captains(commands.Cog):
             await interaction.response.send_message("Pick two different players. 🙂", ephemeral=True)
             return
         a_wins, b_wins, draws = head_to_head(self.db.finished_games(interaction.guild_id), first.id, player.id)
-        a, b = safe(first.display_name), safe(player.display_name)
-        text = f"⚔️ **{a}** vs **{b}**\n"
-        if a_wins + b_wins + draws == 0:
-            text += random.choice(VS_NEVER).format(a=a, b=b)
-        else:
-            text += f"**{a}**: {a_wins} wins · **{b}**: {b_wins} wins · Draws: {draws}\n"
-            if a_wins == b_wins:
-                text += random.choice(VS_TIE)
-            else:
-                leader, loser = (a, b) if a_wins > b_wins else (b, a)
-                crushed = min(a_wins, b_wins) == 0 and max(a_wins, b_wins) >= 3
-                text += random.choice(VS_CRUSH if crushed else VS_LEAD).format(leader=leader, loser=loser)
-        await interaction.response.send_message(text, allowed_mentions=discord.AllowedMentions.none())
+        await interaction.response.send_message(embed=build_vs_embed(first, player, a_wins, b_wins, draws))
 
     @app_commands.guild_only()
     @app_commands.command(name="duo", description="How good are two players together in the same team?")
