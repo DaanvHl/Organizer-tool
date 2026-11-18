@@ -64,11 +64,14 @@ the last player is assigned automatically. The host or an admin can **Cancel** b
 
 **Map vote:** after the draft, the game message shows 5 random maps for the format (10 players = 5v5; the
 lists are in `maps.py`). Every player in the game clicks a map and can change their vote. The vote ends when
-everyone voted, or when a captain clicks **Continue**. The map with the most votes wins; on a tie (or no votes)
+everyone voted, when a captain clicks **Continue**, or after 60 seconds (`MAP_VOTE_SECONDS`; the timer keeps
+running after a bot restart). Once per game a captain can click **New maps** to get 5 other maps; the votes and
+the 60 seconds start again. The map with the most votes wins; on a tie (or no votes)
 the bot picks one of the best maps at random. Formats without a map list (more than 10v10) skip the vote.
 
-**Tiebreaker:** a captain runs `/tiebreaker` to get 3 random maps for their latest game (not the map that was
-just played). Each captain clicks **Ban** on 1 map; the last map is the tiebreaker map.
+**Tiebreaker:** a captain runs `/tiebreaker` to get 3 random maps for their latest game. 3v3 to 6v6 only use
+the fair maps with no side advantage from `TIEBREAKER_MAPS` in `maps.py`; other formats use the normal map list.
+The map that was just played is left out when there are enough other maps (6v6 has only 3, so all 3 are used). Each captain clicks **Ban** on 1 map; the last map is the tiebreaker map.
 
 After the game, the winning captain clicks **Report win**. The other captain must click **Approve**
 (or **Deny**, then the game goes on and the real winner can report again). Admins can also approve.

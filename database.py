@@ -65,7 +65,9 @@ CREATE TABLE IF NOT EXISTS lobbies (
     team_b_voice     INTEGER,
     draft_type       TEXT    NOT NULL DEFAULT 'snake',  -- 'snake' (A B B A ...) or 'normal' (A B A B ...)
     map_options      TEXT,     -- JSON list of the maps in the map vote
-    map_name         TEXT      -- the map that won the vote
+    map_name         TEXT,     -- the map that won the vote
+    map_vote_ends    INTEGER,  -- unix time when the map vote ends by itself
+    map_rerolled     INTEGER NOT NULL DEFAULT 0  -- 1 once a captain used the re-roll button
 );
 
 CREATE TABLE IF NOT EXISTS lobby_players (
@@ -128,6 +130,8 @@ MIGRATIONS = [
     ("player_stats", "streak", "INTEGER NOT NULL DEFAULT 0"),  # filled from past games by recalculate_points()
     ("lobbies", "map_options", "TEXT"),  # JSON list of the maps in the map vote
     ("lobbies", "map_name", "TEXT"),     # the map that won the vote
+    ("lobbies", "map_vote_ends", "INTEGER"),  # unix time when the map vote ends by itself
+    ("lobbies", "map_rerolled", "INTEGER NOT NULL DEFAULT 0"),  # 1 once the maps were re-rolled
 ]
 
 WIN_POINTS = 50    # ranked points a player gets for a win
@@ -214,6 +218,8 @@ class Lobby:
     draft_type: str = "snake"
     map_options: Optional[str] = None
     map_name: Optional[str] = None
+    map_vote_ends: Optional[int] = None
+    map_rerolled: int = 0
 
     @property
     def maps(self) -> List[str]:
@@ -463,7 +469,8 @@ class Database:
         row = self.conn.execute(
             "SELECT id, guild_id, channel_id, creator_id, event_id, queue_message_id, draft_message_id, "
             "status, captain_a, captain_b, winner, reported_by, "
-            "team_a_role, team_b_role, team_a_voice, team_b_voice, draft_type, map_options, map_name "
+            "team_a_role, team_b_role, team_a_voice, team_b_voice, draft_type, map_options, map_name, "
+            "map_vote_ends, map_rerolled "
             "FROM lobbies WHERE id = ?", (lobby_id,)
         ).fetchone()
         return Lobby(**dict(row)) if row else None
@@ -542,6 +549,14 @@ class Database:
             (lobby_id, user_id, choice),
         )
         self.conn.commit()
+
+    def clear_map_votes(self, lobby_id: int) -> None:
+        self.conn.execute("DELETE FROM map_votes WHERE lobby_id = ?", (lobby_id,))
+        self.conn.commit()
+
+    def lobbies_with_status(self, status: str) -> List[int]:
+        rows = self.conn.execute("SELECT id FROM lobbies WHERE status = ?", (status,)).fetchall()
+        return [r["id"] for r in rows]
 
     def map_votes(self, lobby_id: int) -> dict:
         """user_id -> index of the map they voted for."""

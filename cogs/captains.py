@@ -1,7 +1,9 @@
+import asyncio
 import json
 import logging
 import random
 import re
+import time
 import unicodedata
 from typing import List, Optional
 
@@ -13,7 +15,7 @@ from cogs.events import truncate_field
 from cogs.fun import LeaderboardView
 from config import REFEREE_ROLE_IDS
 from database import LOSS_POINTS, STREAK_BONUS, STREAK_MIN, WIN_POINTS, Database, Lobby, LobbyPlayer, Tiebreaker
-from maps import MAP_VOTE_OPTIONS, TIEBREAKER_OPTIONS, game_format, maps_for
+from maps import MAP_VOTE_OPTIONS, MAP_VOTE_SECONDS, TIEBREAKER_OPTIONS, game_format, maps_for, tiebreaker_maps_for
 
 log = logging.getLogger(__name__)
 
@@ -40,6 +42,7 @@ BUTTONS = {
     "approve": ("Approve", "✅", discord.ButtonStyle.success),
     "deny": ("Deny", "❌", discord.ButtonStyle.danger),
     "mapdone": ("Continue", "⏩", discord.ButtonStyle.success),
+    "reroll": ("New maps", "🎲", discord.ButtonStyle.secondary),
 }
 
 
@@ -113,7 +116,7 @@ def team_members(players: List[LobbyPlayer], team: str) -> List[LobbyPlayer]:
 
 
 class LobbyButton(discord.ui.DynamicItem[discord.ui.Button],
-                  template=r"lobby:(?P<action>join|leave|start|cancel|claim|unclaim|lock|snake|normal|report|draw|approve|deny|mapdone)"
+                  template=r"lobby:(?P<action>join|leave|start|cancel|claim|unclaim|lock|snake|normal|report|draw|approve|deny|mapdone|reroll)"
                            r":(?P<id>\d+)"):
     """All buttons of a captains game. The lobby ID lives in the custom_id, so they keep working after a restart."""
 
@@ -271,6 +274,16 @@ def pick_map(options: List[str], votes: dict) -> tuple:
     return random.choice(best), len(best) > 1
 
 
+def new_map_options(player_count: int, current: List[str]) -> List[str]:
+    """Random maps for the map vote. Maps that are in `current` are only used when there are not enough others."""
+    choices = maps_for(player_count)
+    fresh = [m for m in choices if m not in current]
+    count = min(MAP_VOTE_OPTIONS, len(choices))
+    options = random.sample(fresh, min(count, len(fresh)))
+    options += random.sample([m for m in choices if m in current], count - len(options))
+    return options
+
+
 def build_game_embed(lobby: Lobby, players: List[LobbyPlayer], votes: Optional[dict] = None) -> discord.Embed:
     names = {p.user_id: p.name for p in players}
 
@@ -321,6 +334,10 @@ def build_game_embed(lobby: Lobby, players: List[LobbyPlayer], votes: Optional[d
         embed.color = discord.Color.teal()
         embed.description = ("🗺️ **Vote for the map!** Everyone in the game: click a map. You can change your vote.\n"
                              "The vote ends when everyone voted, or when a captain clicks **Continue**.")
+        if lobby.map_vote_ends:
+            embed.description += f"\n⏰ Time is up <t:{lobby.map_vote_ends}:R>."
+        if not lobby.map_rerolled:
+            embed.description += "\nDon't like these maps? A captain can click **New maps** (1 time)."
         counts = vote_counts(lobby.maps, votes)
         lines = [f"**{safe(m)}** · {c} vote{'' if c == 1 else 's'}" for m, c in zip(lobby.maps, counts)]
         voters = [p for p in players if p.team]
@@ -383,6 +400,8 @@ def build_game_view(lobby: Lobby, players: List[LobbyPlayer]) -> Optional[discor
         for index, map_name in enumerate(lobby.maps):
             view.add_item(MapVoteButton(lobby.id, index, map_name))
         view.add_item(LobbyButton("mapdone", lobby.id))
+        if not lobby.map_rerolled:
+            view.add_item(LobbyButton("reroll", lobby.id))
     elif lobby.status == "playing":
         view.add_item(LobbyButton("report", lobby.id))
         view.add_item(LobbyButton("draw", lobby.id))
@@ -627,6 +646,15 @@ class Captains(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self.db: Database = bot.db
+        self.vote_timers = {}  # lobby_id -> asyncio.Task that ends the map vote when time is up
+
+    async def cog_load(self):
+        for lobby_id in self.db.lobbies_with_status("mapvote"):  # votes that were running before a restart
+            self.start_vote_timer(lobby_id)
+
+    async def cog_unload(self):
+        for task in self.vote_timers.values():
+            task.cancel()
 
     # --- buttons ------------------------------------------------------------
 
@@ -795,10 +823,11 @@ class Captains(commands.Cog):
             self.db.assign_pick(lobby.id, last.user_id, last_team, picks_done + 2)
             remaining = []
         if not remaining:
-            choices = maps_for(len(players))
-            if choices:
-                options = random.sample(choices, min(MAP_VOTE_OPTIONS, len(choices)))
-                self.db.update_lobby(lobby.id, status="mapvote", map_options=json.dumps(options))
+            options = new_map_options(len(players), [])
+            if options:
+                self.db.update_lobby(lobby.id, status="mapvote", map_options=json.dumps(options),
+                                     map_vote_ends=int(time.time()) + MAP_VOTE_SECONDS)
+                self.start_vote_timer(lobby.id)
             else:  # no map list for this format (e.g. 11v11): skip the vote
                 self.db.update_lobby(lobby.id, status="playing")
 
@@ -831,15 +860,82 @@ class Captains(commands.Cog):
             return await self.refuse(interaction, "Only a captain can end the map vote.")
         await self.finish_map_vote(interaction, lobby, self.db.map_votes(lobby.id))
 
-    async def finish_map_vote(self, interaction: discord.Interaction, lobby: Lobby, votes: dict):
-        """Saves the map with the most votes (random on a tie) and starts the game."""
-        chosen, was_tie = pick_map(lobby.maps, votes)
-        self.db.update_lobby(lobby.id, status="playing", map_name=chosen)
+    async def on_reroll(self, interaction: discord.Interaction, lobby: Lobby, players: List[LobbyPlayer]):
+        if lobby.status != "mapvote":
+            return await self.refuse(interaction, "The map vote is already over.")
+        if interaction.user.id not in (lobby.captain_a, lobby.captain_b) and not is_admin(interaction):
+            return await self.refuse(interaction, "Only a captain can get new maps.")
+        if lobby.map_rerolled:
+            return await self.refuse(interaction, "The maps were already changed 1 time. Vote for one of these.")
+        options = new_map_options(sum(1 for p in players if p.team), lobby.maps)
+        self.db.clear_map_votes(lobby.id)  # the old votes were for other maps
+        self.db.update_lobby(lobby.id, map_options=json.dumps(options), map_rerolled=1,
+                             map_vote_ends=int(time.time()) + MAP_VOTE_SECONDS)
         await self.show_game(interaction, lobby)
-        text = f"🗺️ Game {lobby.id}: the map is **{safe(chosen)}**! Good luck and have fun! 🍀"
+        await interaction.followup.send(
+            f"🎲 {interaction.user.mention} asked for new maps. Everyone, please vote again!",
+            allowed_mentions=discord.AllowedMentions.none())
+
+    def close_map_vote(self, lobby_id: int) -> Optional[tuple]:
+        """Saves the map with the most votes (random on a tie) and starts the game.
+        Returns (map, was_tie), or None if the vote was already over. No awaits, so it can't end twice."""
+        lobby = self.db.get_lobby(lobby_id)
+        if lobby is None or lobby.status != "mapvote":
+            return None
+        chosen, was_tie = pick_map(lobby.maps, self.db.map_votes(lobby.id))
+        self.db.update_lobby(lobby.id, status="playing", map_name=chosen)
+        return chosen, was_tie
+
+    @staticmethod
+    def map_text(lobby_id: int, chosen: str, was_tie: bool, time_up: bool = False) -> str:
+        text = f"🗺️ Game {lobby_id}: the map is **{safe(chosen)}**! Good luck and have fun! 🍀"
+        if time_up:
+            text = "⏰ Time is up! " + text
         if was_tie:
             text += "\n-# Same number of votes, so the bot picked one at random. 🎲"
-        await interaction.followup.send(text)
+        return text
+
+    async def finish_map_vote(self, interaction: discord.Interaction, lobby: Lobby, votes: dict):
+        result = self.close_map_vote(lobby.id)
+        if result is None:
+            return await self.refuse(interaction, "The map vote is already over.")
+        await self.show_game(interaction, lobby)
+        await interaction.followup.send(self.map_text(lobby.id, *result))
+
+    def start_vote_timer(self, lobby_id: int) -> None:
+        task = self.vote_timers.get(lobby_id)
+        if task is None or task.done():
+            self.vote_timers[lobby_id] = asyncio.create_task(self.run_vote_timer(lobby_id))
+
+    async def run_vote_timer(self, lobby_id: int) -> None:
+        """Ends the map vote when time is up. Waits longer if the time was reset (New maps)."""
+        try:
+            await self.bot.wait_until_ready()
+            while True:
+                lobby = self.db.get_lobby(lobby_id)
+                if lobby is None or lobby.status != "mapvote" or not lobby.map_vote_ends:
+                    return
+                wait = lobby.map_vote_ends - time.time()
+                if wait <= 0:
+                    break
+                await asyncio.sleep(wait)
+            result = self.close_map_vote(lobby_id)
+            if result is None:
+                return
+            lobby = self.db.get_lobby(lobby_id)
+            channel = self.bot.get_channel(lobby.channel_id) or await self.bot.fetch_channel(lobby.channel_id)
+            players = self.db.lobby_players(lobby.id)
+            if lobby.draft_message_id:
+                await channel.get_partial_message(lobby.draft_message_id).edit(
+                    content=None, embed=build_game_embed(lobby, players), view=build_game_view(lobby, players))
+            await channel.send(self.map_text(lobby.id, *result, time_up=True))
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("Map vote timer of lobby %s failed", lobby_id)
+        finally:
+            if self.vote_timers.get(lobby_id) is asyncio.current_task():
+                del self.vote_timers[lobby_id]
 
     async def make_event_team_channels(self, interaction: discord.Interaction, lobby: Lobby,
                                        players: List[LobbyPlayer]) -> None:
@@ -987,7 +1083,9 @@ class Captains(commands.Cog):
             return
         players = self.db.lobby_players(lobby.id)
         in_teams = sum(1 for p in players if p.team)
-        choices = [m for m in maps_for(in_teams) if m != lobby.map_name]
+        choices = tiebreaker_maps_for(in_teams)
+        if len([m for m in choices if m != lobby.map_name]) >= TIEBREAKER_OPTIONS:
+            choices = [m for m in choices if m != lobby.map_name]  # not the map they just played, if possible
         if len(choices) < TIEBREAKER_OPTIONS:
             await interaction.response.send_message(
                 f"There are not enough {game_format(in_teams)} maps for a tiebreaker.", ephemeral=True)

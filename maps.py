@@ -41,7 +41,17 @@ MAPS = {
     ],
 }
 
+# Fair maps with no side advantage, only used for /tiebreaker. Formats that are not here
+# (2v2, 7v7 and bigger) use the normal MAPS list above.
+TIEBREAKER_MAPS = {
+    "3v3": ["Farm", "Valley", "Garder", "Sandbox", "Duality"],
+    "4v4": ["Farm", "Valley", "Pass", "Garder", "Sandbox", "Duality"],
+    "5v5": ["Valley", "Pass", "Garder", "Cross", "Zone"],
+    "6v6": ["Garder", "Cross", "Zone"],
+}
+
 MAP_VOTE_OPTIONS = 5    # maps in the vote after the draft
+MAP_VOTE_SECONDS = 60   # the map vote ends by itself after this time
 TIEBREAKER_OPTIONS = 3  # maps in /tiebreaker; each captain bans 1
 
 
@@ -53,3 +63,9 @@ def game_format(player_count: int) -> str:
 def maps_for(player_count: int) -> list:
     """The maps for this number of players, or [] when there is no list for the format."""
     return list(MAPS.get(game_format(player_count), []))
+
+
+def tiebreaker_maps_for(player_count: int) -> list:
+    """The fair tiebreaker maps for this number of players, or the normal maps when there is no fair list."""
+    fmt = game_format(player_count)
+    return list(TIEBREAKER_MAPS[fmt]) if fmt in TIEBREAKER_MAPS else maps_for(player_count)
