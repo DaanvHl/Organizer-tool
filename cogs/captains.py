@@ -1,3 +1,4 @@
+import json
 import logging
 import random
 import re
@@ -11,7 +12,8 @@ from discord.ext import commands
 from cogs.events import truncate_field
 from cogs.fun import LeaderboardView
 from config import REFEREE_ROLE_IDS
-from database import LOSS_POINTS, STREAK_BONUS, STREAK_MIN, WIN_POINTS, Database, Lobby, LobbyPlayer
+from database import LOSS_POINTS, STREAK_BONUS, STREAK_MIN, WIN_POINTS, Database, Lobby, LobbyPlayer, Tiebreaker
+from maps import MAP_VOTE_OPTIONS, TIEBREAKER_OPTIONS, game_format, maps_for
 
 log = logging.getLogger(__name__)
 
@@ -37,6 +39,7 @@ BUTTONS = {
     "draw": ("Report draw", "🤝", discord.ButtonStyle.secondary),
     "approve": ("Approve", "✅", discord.ButtonStyle.success),
     "deny": ("Deny", "❌", discord.ButtonStyle.danger),
+    "mapdone": ("Continue", "⏩", discord.ButtonStyle.success),
 }
 
 
@@ -110,7 +113,7 @@ def team_members(players: List[LobbyPlayer], team: str) -> List[LobbyPlayer]:
 
 
 class LobbyButton(discord.ui.DynamicItem[discord.ui.Button],
-                  template=r"lobby:(?P<action>join|leave|start|cancel|claim|unclaim|lock|snake|normal|report|draw|approve|deny)"
+                  template=r"lobby:(?P<action>join|leave|start|cancel|claim|unclaim|lock|snake|normal|report|draw|approve|deny|mapdone)"
                            r":(?P<id>\d+)"):
     """All buttons of a captains game. The lobby ID lives in the custom_id, so they keep working after a restart."""
 
@@ -153,6 +156,46 @@ class DraftSelect(discord.ui.DynamicItem[discord.ui.Select],
     async def callback(self, interaction: discord.Interaction):
         cog: "Captains" = interaction.client.get_cog("Captains")
         await cog.handle_pick(interaction, self.lobby_id, int(interaction.data["values"][0]))
+
+
+class MapVoteButton(discord.ui.DynamicItem[discord.ui.Button],
+                    template=r"lobby:vote:(?P<id>\d+):(?P<index>\d+)"):
+    """A map in the map vote after the draft. Every player in the game can click one."""
+
+    def __init__(self, lobby_id: int, index: int, map_name: str):
+        super().__init__(discord.ui.Button(label=map_name[:80], emoji="🗺️", style=discord.ButtonStyle.secondary,
+                                           custom_id=f"lobby:vote:{lobby_id}:{index}"))
+        self.lobby_id = lobby_id
+        self.index = index
+
+    @classmethod
+    async def from_custom_id(cls, interaction: discord.Interaction, item: discord.ui.Button,
+                             match: re.Match[str], /):
+        return cls(int(match["id"]), int(match["index"]), item.label or "Map")
+
+    async def callback(self, interaction: discord.Interaction):
+        cog: "Captains" = interaction.client.get_cog("Captains")
+        await cog.handle_map_vote(interaction, self.lobby_id, self.index)
+
+
+class TiebreakerBanButton(discord.ui.DynamicItem[discord.ui.Button],
+                          template=r"tiebreaker:ban:(?P<id>\d+):(?P<index>\d+)"):
+    """'Ban <map>' on a /tiebreaker message. Each captain bans 1 map."""
+
+    def __init__(self, tiebreaker_id: int, index: int, map_name: str, disabled: bool = False):
+        super().__init__(discord.ui.Button(label=f"Ban {map_name}"[:80], emoji="🚫", style=discord.ButtonStyle.danger,
+                                           disabled=disabled, custom_id=f"tiebreaker:ban:{tiebreaker_id}:{index}"))
+        self.tiebreaker_id = tiebreaker_id
+        self.index = index
+
+    @classmethod
+    async def from_custom_id(cls, interaction: discord.Interaction, item: discord.ui.Button,
+                             match: re.Match[str], /):
+        return cls(int(match["id"]), int(match["index"]), (item.label or "").removeprefix("Ban "))
+
+    async def callback(self, interaction: discord.Interaction):
+        cog: "Captains" = interaction.client.get_cog("Captains")
+        await cog.handle_ban(interaction, self.tiebreaker_id, self.index)
 
 
 class RefereeWinnerView(discord.ui.View):
@@ -212,7 +255,23 @@ def build_queue_view(lobby: Lobby, players: List[LobbyPlayer]) -> Optional[disco
 
 # --- game message (captains, draft, result) ------------------------------------
 
-def build_game_embed(lobby: Lobby, players: List[LobbyPlayer]) -> discord.Embed:
+def vote_counts(options: List[str], votes: dict) -> List[int]:
+    """Number of votes per map, in the same order as options."""
+    counts = [0] * len(options)
+    for choice in votes.values():
+        if 0 <= choice < len(options):
+            counts[choice] += 1
+    return counts
+
+
+def pick_map(options: List[str], votes: dict) -> tuple:
+    """(winning map, True if it was a tie and chosen at random). No votes at all is a tie between all maps."""
+    counts = vote_counts(options, votes)
+    best = [m for m, c in zip(options, counts) if c == max(counts)]
+    return random.choice(best), len(best) > 1
+
+
+def build_game_embed(lobby: Lobby, players: List[LobbyPlayer], votes: Optional[dict] = None) -> discord.Embed:
     names = {p.user_id: p.name for p in players}
 
     if lobby.status == "captains" or (lobby.status == "cancelled" and not any(p.team for p in players)):
@@ -244,6 +303,8 @@ def build_game_embed(lobby: Lobby, players: List[LobbyPlayer]) -> discord.Embed:
     if available:
         embed.add_field(name=f"Available ({len(available)})",
                         value=truncate_field(", ".join(safe(p.name) for p in available)), inline=False)
+    if lobby.map_name and lobby.status != "mapvote":
+        embed.add_field(name="🗺️ Map", value=f"**{safe(lobby.map_name)}**", inline=False)
 
     if lobby.status == "choosing":
         embed.description = ("A captain chooses the draft type:\n"
@@ -255,6 +316,20 @@ def build_game_embed(lobby: Lobby, players: List[LobbyPlayer]) -> discord.Embed:
         captain = lobby.captain_of(draft_turn(picks_done, lobby.draft_type))
         embed.description = f"Now picking: <@{captain}> (pick {picks_done + 1} of {len(players) - 2})"
         embed.set_footer(text=f"{draft_label(lobby)} · Only the captain whose turn it is can pick.")
+    elif lobby.status == "mapvote":
+        votes = votes or {}
+        embed.color = discord.Color.teal()
+        embed.description = ("🗺️ **Vote for the map!** Everyone in the game: click a map. You can change your vote.\n"
+                             "The vote ends when everyone voted, or when a captain clicks **Continue**.")
+        counts = vote_counts(lobby.maps, votes)
+        lines = [f"**{safe(m)}** · {c} vote{'' if c == 1 else 's'}" for m, c in zip(lobby.maps, counts)]
+        voters = [p for p in players if p.team]
+        embed.add_field(name=f"Maps ({sum(1 for p in voters if p.user_id in votes)} of {len(voters)} voted)",
+                        value="\n".join(lines), inline=False)
+        waiting = [safe(p.name) for p in voters if p.user_id not in votes]
+        if waiting:
+            embed.add_field(name="Did not vote yet", value=truncate_field(", ".join(waiting)), inline=False)
+        embed.set_footer(text="Same number of votes? The bot picks one of them at random.")
     elif lobby.status == "playing":
         embed.color = discord.Color.green()
         embed.description = ("✅ Draft complete! After the game, the winning captain clicks **Report win**.\n"
@@ -304,6 +379,10 @@ def build_game_view(lobby: Lobby, players: List[LobbyPlayer]) -> Optional[discor
             if len(chunks) > 1:
                 placeholder = f"Pick a player ({index * 25 + 1}–{index * 25 + len(chunk)})…"
             view.add_item(DraftSelect(lobby.id, index, chunk, placeholder))
+    elif lobby.status == "mapvote":
+        for index, map_name in enumerate(lobby.maps):
+            view.add_item(MapVoteButton(lobby.id, index, map_name))
+        view.add_item(LobbyButton("mapdone", lobby.id))
     elif lobby.status == "playing":
         view.add_item(LobbyButton("report", lobby.id))
         view.add_item(LobbyButton("draw", lobby.id))
@@ -325,6 +404,41 @@ def claim_text(lobby: Lobby, players: List[LobbyPlayer]) -> str:
     if lobby.team_of_captain(lobby.reported_by) is None:
         who = f"Referee {who}"
     return f"{'🤝' if lobby.winner == DRAW else '🏆'} {who} says {result_text(lobby, players)}."
+
+
+def build_tiebreaker_embed(tiebreaker: Tiebreaker, lobby: Lobby, players: List[LobbyPlayer]) -> discord.Embed:
+    names = {p.user_id: p.name for p in players}
+    banned_by = {tiebreaker.ban_a: lobby.captain_a, tiebreaker.ban_b: lobby.captain_b}
+    lines = []
+    for index, map_name in enumerate(tiebreaker.maps):
+        if index in tiebreaker.banned:
+            lines.append(f"🚫 ~~{safe(map_name)}~~ · banned by {safe(names.get(banned_by[index], 'a captain'))}")
+        elif tiebreaker.final_map:
+            lines.append(f"✅ **{safe(map_name)}**")
+        else:
+            lines.append(f"🗺️ **{safe(map_name)}**")
+    embed = discord.Embed(title=f"⚔️ Tiebreaker · Game {lobby.id}", description="\n".join(lines),
+                          color=discord.Color.orange())
+    if tiebreaker.final_map:
+        embed.color = discord.Color.green()
+        embed.add_field(name="🗺️ Tiebreaker map", value=f"**{safe(tiebreaker.final_map)}**! Good luck! 🍀",
+                        inline=False)
+    else:
+        waiting = [captain for captain, ban in ((lobby.captain_a, tiebreaker.ban_a),
+                                                (lobby.captain_b, tiebreaker.ban_b)) if ban is None]
+        embed.add_field(name="How it works",
+                        value=("Each captain bans 1 map. The last map is the tiebreaker map.\n"
+                               f"Waiting for: {' and '.join(f'<@{c}>' for c in waiting)}"), inline=False)
+    return embed
+
+
+def build_tiebreaker_view(tiebreaker: Tiebreaker) -> Optional[discord.ui.View]:
+    if tiebreaker.final_map:
+        return None
+    view = discord.ui.View(timeout=None)
+    for index, map_name in enumerate(tiebreaker.maps):
+        view.add_item(TiebreakerBanButton(tiebreaker.id, index, map_name, disabled=index in tiebreaker.banned))
+    return view
 
 
 def build_approval_view(lobby: Lobby) -> discord.ui.View:
@@ -538,7 +652,8 @@ class Captains(commands.Cog):
         """Updates the game message the button was clicked on."""
         lobby = self.db.get_lobby(lobby.id)
         players = self.db.lobby_players(lobby.id)
-        await interaction.response.edit_message(content=None, embed=build_game_embed(lobby, players),
+        await interaction.response.edit_message(content=None,
+                                                embed=build_game_embed(lobby, players, self.db.map_votes(lobby.id)),
                                                 view=build_game_view(lobby, players))
 
     async def on_join(self, interaction: discord.Interaction, lobby: Lobby, players: List[LobbyPlayer]):
@@ -680,12 +795,51 @@ class Captains(commands.Cog):
             self.db.assign_pick(lobby.id, last.user_id, last_team, picks_done + 2)
             remaining = []
         if not remaining:
-            self.db.update_lobby(lobby.id, status="playing")
+            choices = maps_for(len(players))
+            if choices:
+                options = random.sample(choices, min(MAP_VOTE_OPTIONS, len(choices)))
+                self.db.update_lobby(lobby.id, status="mapvote", map_options=json.dumps(options))
+            else:  # no map list for this format (e.g. 11v11): skip the vote
+                self.db.update_lobby(lobby.id, status="playing")
 
         await self.show_game(interaction, lobby)
         if not remaining:
             await self.make_event_team_channels(interaction, self.db.get_lobby(lobby.id),
                                                 self.db.lobby_players(lobby.id))
+
+    async def handle_map_vote(self, interaction: discord.Interaction, lobby_id: int, index: int):
+        lobby = self.db.get_lobby(lobby_id)
+        if lobby is None or lobby.status != "mapvote":
+            await interaction.response.send_message("The map vote is over.", ephemeral=True)
+            return
+        players = [p for p in self.db.lobby_players(lobby.id) if p.team]
+        if not any(p.user_id == interaction.user.id for p in players):
+            return await self.refuse(interaction, "Only players in this game can vote for the map.")
+        if not 0 <= index < len(lobby.maps):
+            return await self.refuse(interaction, "This map is not in the vote.")
+        # No awaits between saving the vote and checking if everyone voted, so the vote can't end twice.
+        self.db.set_map_vote(lobby.id, interaction.user.id, index)
+        votes = self.db.map_votes(lobby.id)
+        if all(p.user_id in votes for p in players):
+            return await self.finish_map_vote(interaction, lobby, votes)
+        await self.show_game(interaction, lobby)
+
+    async def on_mapdone(self, interaction: discord.Interaction, lobby: Lobby, players: List[LobbyPlayer]):
+        if lobby.status != "mapvote":
+            return await self.refuse(interaction, "The map vote is already over.")
+        if interaction.user.id not in (lobby.captain_a, lobby.captain_b) and not is_admin(interaction):
+            return await self.refuse(interaction, "Only a captain can end the map vote.")
+        await self.finish_map_vote(interaction, lobby, self.db.map_votes(lobby.id))
+
+    async def finish_map_vote(self, interaction: discord.Interaction, lobby: Lobby, votes: dict):
+        """Saves the map with the most votes (random on a tie) and starts the game."""
+        chosen, was_tie = pick_map(lobby.maps, votes)
+        self.db.update_lobby(lobby.id, status="playing", map_name=chosen)
+        await self.show_game(interaction, lobby)
+        text = f"🗺️ Game {lobby.id}: the map is **{safe(chosen)}**! Good luck and have fun! 🍀"
+        if was_tie:
+            text += "\n-# Same number of votes, so the bot picked one at random. 🎲"
+        await interaction.followup.send(text)
 
     async def make_event_team_channels(self, interaction: discord.Interaction, lobby: Lobby,
                                        players: List[LobbyPlayer]) -> None:
@@ -750,7 +904,8 @@ class Captains(commands.Cog):
         players = self.db.lobby_players(lobby.id)
         try:
             await interaction.channel.get_partial_message(lobby.draft_message_id).edit(
-                content=None, embed=build_game_embed(lobby, players), view=build_game_view(lobby, players))
+                content=None, embed=build_game_embed(lobby, players, self.db.map_votes(lobby.id)),
+                view=build_game_view(lobby, players))
         except discord.HTTPException as e:
             log.warning("Could not update game message of lobby %s: %s", lobby.id, e)
 
@@ -821,6 +976,52 @@ class Captains(commands.Cog):
             embed=build_queue_embed(lobby, players), view=build_queue_view(lobby, players))
         message = await interaction.original_response()
         self.db.update_lobby(lobby_id, queue_message_id=message.id)
+
+    @app_commands.guild_only()
+    @app_commands.command(name="tiebreaker", description="Captains: get 3 maps for a tiebreaker. Each captain bans 1.")
+    async def tiebreaker(self, interaction: discord.Interaction):
+        lobby = self.db.latest_captain_lobby(interaction.guild_id, interaction.user.id)
+        if lobby is None:
+            await interaction.response.send_message(
+                "Only a captain can use this, after the map vote of their game.", ephemeral=True)
+            return
+        players = self.db.lobby_players(lobby.id)
+        in_teams = sum(1 for p in players if p.team)
+        choices = [m for m in maps_for(in_teams) if m != lobby.map_name]
+        if len(choices) < TIEBREAKER_OPTIONS:
+            await interaction.response.send_message(
+                f"There are not enough {game_format(in_teams)} maps for a tiebreaker.", ephemeral=True)
+            return
+        tiebreaker = self.db.get_tiebreaker(
+            self.db.create_tiebreaker(lobby.id, random.sample(choices, TIEBREAKER_OPTIONS)))
+        captains = [lobby.captain_a, lobby.captain_b]
+        await interaction.response.send_message(
+            f"⚔️ {' '.join(f'<@{c}>' for c in captains)}: tiebreaker! Each of you bans 1 map.",
+            embed=build_tiebreaker_embed(tiebreaker, lobby, players), view=build_tiebreaker_view(tiebreaker),
+            allowed_mentions=discord.AllowedMentions(users=[discord.Object(c) for c in captains]))
+
+    async def handle_ban(self, interaction: discord.Interaction, tiebreaker_id: int, index: int):
+        tiebreaker = self.db.get_tiebreaker(tiebreaker_id)
+        if tiebreaker is None:
+            return await self.refuse(interaction, "This tiebreaker does not exist anymore.")
+        if tiebreaker.final_map:
+            return await self.refuse(interaction, f"The bans are done. The map is **{safe(tiebreaker.final_map)}**.")
+        lobby = self.db.get_lobby(tiebreaker.lobby_id)
+        team = lobby.team_of_captain(interaction.user.id)
+        if team is None:
+            return await self.refuse(interaction, "Only the 2 captains can ban maps.")
+        if (tiebreaker.ban_a if team == "A" else tiebreaker.ban_b) is not None:
+            return await self.refuse(interaction, "You already banned a map. Now the other captain bans one.")
+        if index in tiebreaker.banned or not 0 <= index < len(tiebreaker.maps):
+            return await self.refuse(interaction, "This map is already banned. Pick another one.")
+        self.db.set_tiebreaker_ban(tiebreaker.id, team, index)
+        tiebreaker = self.db.get_tiebreaker(tiebreaker.id)
+        await interaction.response.edit_message(
+            embed=build_tiebreaker_embed(tiebreaker, lobby, self.db.lobby_players(lobby.id)),
+            view=build_tiebreaker_view(tiebreaker))
+        if tiebreaker.final_map:
+            await interaction.followup.send(
+                f"🗺️ Tiebreaker map for game {lobby.id}: **{safe(tiebreaker.final_map)}**! Good luck! 🍀")
 
     @app_commands.guild_only()
     @app_commands.command(name="stats", description="See someone's ranked points, wins, losses and draws")

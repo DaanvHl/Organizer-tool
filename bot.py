@@ -4,7 +4,7 @@ import discord
 from discord.ext import commands
 
 import config
-from cogs.captains import DraftSelect, LobbyButton
+from cogs.captains import DraftSelect, LobbyButton, MapVoteButton, TiebreakerBanButton
 from cogs.events import ChannelPollSelect, EventButton, PollSelect
 from database import Database
 
@@ -36,7 +36,8 @@ class EventBot(commands.Bot):
         self.db = Database(config.DATABASE_PATH)
 
     async def setup_hook(self):
-        self.add_dynamic_items(EventButton, PollSelect, ChannelPollSelect, DraftSelect, LobbyButton)
+        self.add_dynamic_items(EventButton, PollSelect, ChannelPollSelect, DraftSelect, LobbyButton,
+                               MapVoteButton, TiebreakerBanButton)
         await self.load_extension("cogs.events")
         await self.load_extension("cogs.fun")
         await self.load_extension("cogs.captains")

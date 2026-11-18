@@ -45,7 +45,7 @@ CREATE TABLE IF NOT EXISTS poll_votes (
     PRIMARY KEY (poll_id, user_id)
 );
 
--- Captains games started with /captains: queue -> captains -> choosing -> drafting -> playing -> reported -> done
+-- Captains games started with /captains: queue -> captains -> choosing -> drafting -> mapvote -> playing -> reported -> done
 CREATE TABLE IF NOT EXISTS lobbies (
     id               INTEGER PRIMARY KEY AUTOINCREMENT,
     guild_id         INTEGER NOT NULL,
@@ -54,7 +54,7 @@ CREATE TABLE IF NOT EXISTS lobbies (
     event_id         INTEGER REFERENCES events(id) ON DELETE SET NULL,  -- set when started in an event channel
     queue_message_id INTEGER,
     draft_message_id INTEGER,
-    status           TEXT    NOT NULL DEFAULT 'queue',  -- queue, captains, choosing, drafting, playing, reported, done, cancelled, removed
+    status           TEXT    NOT NULL DEFAULT 'queue',  -- queue, captains, choosing, drafting, mapvote, playing, reported, done, cancelled, removed
     captain_a        INTEGER,
     captain_b        INTEGER,
     winner           TEXT,     -- 'A', 'B' or 'draw' once a result is reported
@@ -63,7 +63,9 @@ CREATE TABLE IF NOT EXISTS lobbies (
     team_b_role      INTEGER,
     team_a_voice     INTEGER,
     team_b_voice     INTEGER,
-    draft_type       TEXT    NOT NULL DEFAULT 'snake'  -- 'snake' (A B B A ...) or 'normal' (A B A B ...)
+    draft_type       TEXT    NOT NULL DEFAULT 'snake',  -- 'snake' (A B B A ...) or 'normal' (A B A B ...)
+    map_options      TEXT,     -- JSON list of the maps in the map vote
+    map_name         TEXT      -- the map that won the vote
 );
 
 CREATE TABLE IF NOT EXISTS lobby_players (
@@ -87,6 +89,23 @@ CREATE TABLE IF NOT EXISTS player_stats (
     PRIMARY KEY (guild_id, user_id)
 );
 
+-- Map votes after the captains draft: one vote per player, choice = index into lobbies.map_options
+CREATE TABLE IF NOT EXISTS map_votes (
+    lobby_id INTEGER NOT NULL REFERENCES lobbies(id) ON DELETE CASCADE,
+    user_id  INTEGER NOT NULL,
+    choice   INTEGER NOT NULL,
+    PRIMARY KEY (lobby_id, user_id)
+);
+
+-- /tiebreaker: 3 maps, each captain bans 1 (ban_a / ban_b = index into maps)
+CREATE TABLE IF NOT EXISTS tiebreakers (
+    id       INTEGER PRIMARY KEY AUTOINCREMENT,
+    lobby_id INTEGER NOT NULL REFERENCES lobbies(id) ON DELETE CASCADE,
+    maps     TEXT    NOT NULL,  -- JSON list of map names
+    ban_a    INTEGER,
+    ban_b    INTEGER
+);
+
 -- /bonk counter
 CREATE TABLE IF NOT EXISTS bonks (
     guild_id INTEGER NOT NULL,
@@ -107,6 +126,8 @@ MIGRATIONS = [
     ("player_stats", "draws", "INTEGER NOT NULL DEFAULT 0"),
     ("player_stats", "points", "INTEGER NOT NULL DEFAULT 0"),  # filled from past games by recalculate_points()
     ("player_stats", "streak", "INTEGER NOT NULL DEFAULT 0"),  # filled from past games by recalculate_points()
+    ("lobbies", "map_options", "TEXT"),  # JSON list of the maps in the map vote
+    ("lobbies", "map_name", "TEXT"),     # the map that won the vote
 ]
 
 WIN_POINTS = 50    # ranked points a player gets for a win
@@ -191,12 +212,43 @@ class Lobby:
     team_a_voice: Optional[int] = None
     team_b_voice: Optional[int] = None
     draft_type: str = "snake"
+    map_options: Optional[str] = None
+    map_name: Optional[str] = None
+
+    @property
+    def maps(self) -> List[str]:
+        """The maps in the map vote."""
+        return json.loads(self.map_options) if self.map_options else []
 
     def captain_of(self, team: str) -> Optional[int]:
         return self.captain_a if team == "A" else self.captain_b
 
     def team_of_captain(self, user_id: int) -> Optional[str]:
         return "A" if user_id == self.captain_a else "B" if user_id == self.captain_b else None
+
+
+@dataclass
+class Tiebreaker:
+    id: int
+    lobby_id: int
+    maps_json: str
+    ban_a: Optional[int]  # index of the map captain A banned
+    ban_b: Optional[int]  # index of the map captain B banned
+
+    @property
+    def maps(self) -> List[str]:
+        return json.loads(self.maps_json)
+
+    @property
+    def banned(self) -> List[int]:
+        return [ban for ban in (self.ban_a, self.ban_b) if ban is not None]
+
+    @property
+    def final_map(self) -> Optional[str]:
+        """The map that is left once both captains banned one, else None."""
+        if self.ban_a is None or self.ban_b is None:
+            return None
+        return next(m for i, m in enumerate(self.maps) if i not in self.banned)
 
 
 @dataclass
@@ -411,7 +463,8 @@ class Database:
         row = self.conn.execute(
             "SELECT id, guild_id, channel_id, creator_id, event_id, queue_message_id, draft_message_id, "
             "status, captain_a, captain_b, winner, reported_by, "
-            "team_a_role, team_b_role, team_a_voice, team_b_voice, draft_type FROM lobbies WHERE id = ?", (lobby_id,)
+            "team_a_role, team_b_role, team_a_voice, team_b_voice, draft_type, map_options, map_name "
+            "FROM lobbies WHERE id = ?", (lobby_id,)
         ).fetchone()
         return Lobby(**dict(row)) if row else None
 
@@ -469,6 +522,47 @@ class Database:
             "UPDATE lobby_players SET team = ?, pick_no = ? WHERE lobby_id = ? AND user_id = ?",
             (team, pick_no, lobby_id, user_id),
         )
+        self.conn.commit()
+
+    def latest_captain_lobby(self, guild_id: int, user_id: int) -> Optional[Lobby]:
+        """The newest drafted game (map chosen or later) in this server where the user is a captain."""
+        row = self.conn.execute(
+            "SELECT id FROM lobbies WHERE guild_id = ? AND (captain_a = ? OR captain_b = ?) "
+            "AND status IN ('playing', 'reported', 'done') ORDER BY id DESC LIMIT 1",
+            (guild_id, user_id, user_id),
+        ).fetchone()
+        return self.get_lobby(row["id"]) if row else None
+
+    # --- map votes and tiebreakers ------------------------------------------
+
+    def set_map_vote(self, lobby_id: int, user_id: int, choice: int) -> None:
+        self.conn.execute(
+            "INSERT INTO map_votes (lobby_id, user_id, choice) VALUES (?, ?, ?) "
+            "ON CONFLICT (lobby_id, user_id) DO UPDATE SET choice = excluded.choice",
+            (lobby_id, user_id, choice),
+        )
+        self.conn.commit()
+
+    def map_votes(self, lobby_id: int) -> dict:
+        """user_id -> index of the map they voted for."""
+        rows = self.conn.execute("SELECT user_id, choice FROM map_votes WHERE lobby_id = ?", (lobby_id,)).fetchall()
+        return {r["user_id"]: r["choice"] for r in rows}
+
+    def create_tiebreaker(self, lobby_id: int, maps: List[str]) -> int:
+        cur = self.conn.execute("INSERT INTO tiebreakers (lobby_id, maps) VALUES (?, ?)",
+                                (lobby_id, json.dumps(maps)))
+        self.conn.commit()
+        return cur.lastrowid
+
+    def get_tiebreaker(self, tiebreaker_id: int) -> Optional[Tiebreaker]:
+        row = self.conn.execute(
+            "SELECT id, lobby_id, maps AS maps_json, ban_a, ban_b FROM tiebreakers WHERE id = ?", (tiebreaker_id,)
+        ).fetchone()
+        return Tiebreaker(**dict(row)) if row else None
+
+    def set_tiebreaker_ban(self, tiebreaker_id: int, team: str, index: int) -> None:
+        column = "ban_a" if team == "A" else "ban_b"
+        self.conn.execute(f"UPDATE tiebreakers SET {column} = ? WHERE id = ?", (index, tiebreaker_id))
         self.conn.commit()
 
     # --- wins, losses, draws and ranked points ---------------------------------------------

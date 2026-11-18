@@ -23,6 +23,7 @@ over, the channel and role are deleted.
 | `/event cancel` | Inside the event channel | Organizer / admins |
 | `/event list` | Anywhere | Everyone |
 | `/captains` | Anywhere | Everyone |
+| `/tiebreaker` | Anywhere | Captains of the latest game |
 | `/stats [member]` | Anywhere | Everyone |
 | `/leaderboard` | Anywhere | Everyone |
 | `/vs player [player2]` | Anywhere | Everyone |
@@ -60,6 +61,14 @@ when there are 2 captains, a captain clicks **Lock in**. A coin flip decides who
 a captain chooses the draft type with a button: **Snake draft** (1 2 2 1 1 2 2 1 …) or **Normal draft**
 (1 2 1 2 …). Then the captains pick players. Only the captain whose turn it is can pick;
 the last player is assigned automatically. The host or an admin can **Cancel** before the draft starts.
+
+**Map vote:** after the draft, the game message shows 5 random maps for the format (10 players = 5v5; the
+lists are in `maps.py`). Every player in the game clicks a map and can change their vote. The vote ends when
+everyone voted, or when a captain clicks **Continue**. The map with the most votes wins; on a tie (or no votes)
+the bot picks one of the best maps at random. Formats without a map list (more than 10v10) skip the vote.
+
+**Tiebreaker:** a captain runs `/tiebreaker` to get 3 random maps for their latest game (not the map that was
+just played). Each captain clicks **Ban** on 1 map; the last map is the tiebreaker map.
 
 After the game, the winning captain clicks **Report win**. The other captain must click **Approve**
 (or **Deny**, then the game goes on and the real winner can report again). Admins can also approve.
